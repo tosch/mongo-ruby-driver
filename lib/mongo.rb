@@ -57,6 +57,7 @@ require 'mongo/gridfs/grid'
 require 'mongo/gridfs/grid_io'
 if RUBY_PLATFORM =~ /java/
   require 'mongo/gridfs/grid_io_fix'
+  require 'mongo/util/worker_pool'
 end
 require 'mongo/gridfs/grid_file_system'
 

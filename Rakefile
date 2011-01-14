@@ -73,6 +73,11 @@ namespace :test do
     end
   end
 
+  Rake::TestTask.new(:async) do |t|
+    t.test_files = FileList['test/async/*_test.rb']
+    t.verbose    = true
+  end
+
   desc "Run the replica set test suite"
   Rake::TestTask.new(:rs) do |t|
     t.test_files = FileList['test/replica_sets/*_test.rb']

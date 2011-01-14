@@ -223,11 +223,8 @@ module Mongo
     #     puts doc['user']
     #   end
     def each
-      #num_returned = 0
-      #while has_next? && (@limit <= 0 || num_returned < @limit)
       while doc = next_document
-        yield doc #next_document
-        #num_returned += 1
+        yield doc
       end
     end
 
@@ -285,7 +282,9 @@ module Mongo
     # Is this cursor closed?
     #
     # @return [Boolean]
-    def closed?; @closed; end
+    def closed?
+      @closed || (@cursor_id && @cursor_id.zero?)
+    end
 
     # Returns an integer indicating which query options have been selected.
     #
