@@ -190,9 +190,13 @@ module Mongo
 
     def check_is_master(node)
       begin
-        host, port = *node
-        socket = TCPSocket.new(host, port)
-        socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+        if node[1]
+          host, port = *node
+          socket = TCPSocket.new(host, port)
+          socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+        else
+          socket = UNIXSocket.new(node[0])
+        end
 
         config = self['admin'].command({:ismaster => 1}, :socket => socket)
 
@@ -255,9 +259,14 @@ module Mongo
     def set_auxillary(node, config)
       if config
         if config['secondary']
-          host, port = *node
           @secondaries << node unless @secondaries.include?(node)
-          @secondary_pools << Pool.new(self, host, port, :size => @pool_size, :timeout => @timeout)
+          if node[1]
+            host, port = *node
+            @secondary_pools << Pool.new(self, host, port, :size => @pool_size, :timeout => @timeout)
+          else
+            unix_socket_path = *node
+            @secondary_pools << Pool.new(self, unix_socket_path, nil, :size => @pool_size, :timeout => @timeout)
+          end
         elsif config['arbiterOnly']
           @arbiters << node unless @arbiters.include?(node)
         end
@@ -275,12 +284,19 @@ module Mongo
     def update_node_list(hosts)
       new_nodes = hosts.map do |host|
         if !host.respond_to?(:split)
-          warn "Could not parse host #{host.inspect}."
-          next
+            warn "Could not parse host #{host.inspect}."
+            next
         end
-
+        
         host, port = host.split(':')
-        [host, port ? port.to_i : Connection::DEFAULT_PORT]
+        unless port || File.exists?(host)
+          port = Connection::DEFAULT_PORT
+        end
+        if port
+          [host, port.to_i]
+        else
+          [host]
+        end
       end
 
       # Replace the list of seed nodes with the canonical list.

@@ -25,6 +25,7 @@ module Mongo
   # Instantiates and manages connections to MongoDB.
   class Connection
     TCPSocket = ::TCPSocket
+    UNIXSocket = ::UNIXSocket
     Mutex = ::Mutex
     ConditionVariable = ::ConditionVariable
 
@@ -35,7 +36,7 @@ module Mongo
     STANDARD_HEADER_SIZE = 16
     RESPONSE_HEADER_SIZE = 20
 
-    attr_reader :logger, :size, :auths, :primary, :safe, :primary_pool, :host_to_try, :pool_size
+    attr_reader :logger, :size, :auths, :primary, :safe, :primary_pool, :host_to_try, :pool_size, :unix_socket_path
 
     # Counter for generating unique request ids.
     @@current_request_id = 0
@@ -95,6 +96,8 @@ module Mongo
 
       # slave_ok can be true only if one node is specified
       @slave_ok = opts[:slave_ok]
+
+      opts[:socket] = host[:socket] if host.kind_of?(Hash) && !opts[:socket]
 
       setup(opts)
     end
@@ -475,7 +478,7 @@ module Mongo
       if connected?
         BSON::BSON_CODER.update_max_bson_size(self)
       else
-        raise ConnectionFailure, "Failed to connect to a master node at #{@host_to_try[0]}:#{@host_to_try[1]}"
+        raise ConnectionFailure, "Failed to connect to a master node at #{self.to_s}"
       end
     end
     alias :reconnect :connect
@@ -488,7 +491,7 @@ module Mongo
     # NOTE: Do check if this needs to be more stringent.
     # Probably not since if any node raises a connection failure, all nodes will be closed.
     def connected?
-      @primary_pool && @primary_pool.host && @primary_pool.port
+      @primary_pool && ((@primary_pool.host && @primary_pool.port) || @primary_pool.unix_socket_path )
     end
 
     # Determine if the connection is active. In a normal case the *server_info* operation
@@ -570,6 +573,14 @@ module Mongo
       res
     end
 
+    def to_s
+      if @host_to_try[1]
+        "#{@host_to_try[0]}:#{@host_to_try[1]}"
+      else
+        "#{@host_to_try[0]}"
+      end
+    end
+
     protected
 
     # Generic initialization code.
@@ -607,6 +618,9 @@ module Mongo
         @logger.debug("MongoDB logging. Please note that logging negatively impacts performance " +
         "and should be disabled for high-performance production apps.")
       end
+
+      @unix_socket_path = opts[:socket]
+      @host_to_try = [@unix_socket_path] if @unix_socket_path
 
       should_connect = opts.fetch(:connect, true)
       connect if should_connect
@@ -654,9 +668,13 @@ module Mongo
 
     def check_is_master(node)
       begin
-        host, port = *node
-        socket = TCPSocket.new(host, port)
-        socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+        if node[1]
+          host, port = *node
+          socket = TCPSocket.new(host, port)
+          socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+        else
+          socket = UNIXSocket.new(node[0])
+        end
 
         config = self['admin'].command({:ismaster => 1}, :socket => socket)
       rescue OperationFailure, SocketError, SystemCallError, IOError => ex
@@ -670,9 +688,15 @@ module Mongo
 
     # Set the specified node as primary.
     def set_primary(node)
-      host, port = *node
-      @primary = [host, port]
-      @primary_pool = Pool.new(self, host, port, :size => @pool_size, :timeout => @timeout)
+      if node[1]
+        host, port = *node
+        @primary = [host, port]
+        @primary_pool = Pool.new(self, host, port, :size => @pool_size, :timeout => @timeout)
+      else
+        socket_path = node[0]
+        @primary = [socket_path]
+        @primary_pool = Pool.new(self, socket_path, nil, :size => @pool_size, :timeout => @timeout)
+      end
     end
 
     ## Low-level connection methods.

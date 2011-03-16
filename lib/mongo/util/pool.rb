@@ -18,7 +18,7 @@
 module Mongo
   class Pool
 
-    attr_accessor :host, :port, :size, :timeout, :safe, :checked_out
+    attr_accessor :host, :port, :size, :timeout, :safe, :checked_out, :unix_socket_path
 
     # Create a new pool of connections.
     #
@@ -26,6 +26,11 @@ module Mongo
       @connection  = connection
 
       @host, @port = host, port
+
+      unless @port
+        @unix_socket_path = host
+        @host = nil
+      end
 
       # Pool size and timeout.
       @size      = opts[:size] || 1
@@ -49,10 +54,10 @@ module Mongo
         begin
           sock.close
         rescue IOError => ex
-          warn "IOError when attempting to close socket connected to #{@host}:#{@port}: #{ex.inspect}"
+          warn "IOError when attempting to close socket connected to #{self.to_s}: #{ex.inspect}"
         end
       end
-      @host = @port = nil
+      @host = @port = @unix_socket_path = nil
       @sockets.clear
       @checked_out.clear
     end
@@ -72,10 +77,14 @@ module Mongo
     # therefore, it runs within a mutex.
     def checkout_new_socket
       begin
-      socket = TCPSocket.new(@host, @port)
-      socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+        if @unix_socket_path
+          socket = UNIXSocket.new(@unix_socket_path)
+        else
+          socket = TCPSocket.new(@host, @port)
+          socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+        end
       rescue => ex
-        raise ConnectionFailure, "Failed to connect to host #{@host} and port #{@port}: #{ex}"
+        raise ConnectionFailure, "Failed to connect to #{self.to_s}: #{ex}"
       end
 
       # If any saved authentications exist, we want to apply those
@@ -162,6 +171,14 @@ module Mongo
             @queue.wait(@connection_mutex)
           end
         end
+      end
+    end
+
+    def to_s
+      if @unix_socket_path
+        "#{@unix_socket_path}"
+      else
+        "#{@host}:#{@port}"
       end
     end
   end

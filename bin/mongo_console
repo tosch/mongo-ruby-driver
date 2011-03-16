@@ -9,12 +9,25 @@ require 'mongo'
 
 include Mongo
 
-host = org_argv[0] || ENV['MONGO_RUBY_DRIVER_HOST'] || 'localhost'
-port = org_argv[1] || ENV['MONGO_RUBY_DRIVER_PORT'] || Connection::DEFAULT_PORT
-dbnm = org_argv[2] || ENV['MONGO_RUBY_DRIVER_DB']   || 'ruby-mongo-console'
+unix_socket_path = org_argv[0] || ENV['MONGO_RUBY_DRIVER_UNIX_SOCKET_PATH']
 
-puts "Connecting to #{host}:#{port} (CONN) on with database #{dbnm} (DB)"
-CONN = Connection.new(host, port)
+if File.exists? unix_socket_path
+  dbnm = org_argv[1] || ENV['MONGO_RUBY_DRIVER_DB']   || 'ruby-mongo-console'
+else
+  unix_socket_path = nil
+  host = org_argv[0] || ENV['MONGO_RUBY_DRIVER_HOST'] || 'localhost'
+  port = org_argv[1] || ENV['MONGO_RUBY_DRIVER_PORT'] || Connection::DEFAULT_PORT
+  dbnm = org_argv[2] || ENV['MONGO_RUBY_DRIVER_DB']   || 'ruby-mongo-console'
+end
+
+if unix_socket_path
+  puts "Connecting to #{unix_socket_path} (CONN) on with database #{dbnm} (DB)"
+  CONN = Connection.new(:socket => unix_socket_path)
+else
+  puts "Connecting to #{host}:#{port} (CONN) on with database #{dbnm} (DB)"
+  CONN = Connection.new(host, port)
+end
+
 DB = CONN.db(dbnm)
 
 puts "Starting IRB session..."
