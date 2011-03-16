@@ -18,9 +18,7 @@
 
 $:.unshift(File.join(File.dirname(__FILE__), '..', 'lib'))
 
-module Mongo
-  VERSION = "1.2.4"
-end
+require 'mongo/version'
 
 module Mongo
   ASCENDING  =  1

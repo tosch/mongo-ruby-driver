@@ -1,4 +1,4 @@
-require "./lib/mongo"
+require "./lib/mongo/version"
 
 Gem::Specification.new do |s|
   s.name = 'mongo'
