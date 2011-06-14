@@ -22,6 +22,11 @@ class TestConnection < Test::Unit::TestCase
     end
   end
 
+  def test_host_port_accessors
+    assert_equal @conn.host, TEST_HOST
+    assert_equal @conn.port, TEST_PORT
+  end
+
   def test_server_info
     server_info = @conn.server_info
     assert server_info.keys.include?("version")
@@ -40,7 +45,7 @@ class TestConnection < Test::Unit::TestCase
   end
 
   def test_server_version
-    assert_match /\d\.\d+(\.\d+)?/, @conn.server_version.to_s
+    assert_match(/\d\.\d+(\.\d+)?/, @conn.server_version.to_s)
   end
 
   def test_invalid_database_names
@@ -154,7 +159,7 @@ class TestConnection < Test::Unit::TestCase
     @conn.lock!
     assert @conn.locked?
     assert_equal 1, @conn['admin']['$cmd.sys.inprog'].find_one['fsyncLock'], "Not fsync-locked"
-    assert_equal "unlock requested", @conn.unlock!['info']
+    assert_match(/unlock/, @conn.unlock!['info'])
     unlocked = false
     counter  = 0
     while counter < 5
@@ -220,6 +225,7 @@ class TestConnection < Test::Unit::TestCase
 
     conn.primary_pool.host = 'localhost'
     conn.primary_pool.port = Mongo::Connection::DEFAULT_PORT
+    conn.primary_pool.instance_variable_set("@pids", {dropped_socket => Process.pid})
     conn.primary_pool.instance_variable_set("@sockets", [dropped_socket])
 
     assert !conn.active?

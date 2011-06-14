@@ -10,6 +10,7 @@ This documentation includes other articles of interest, include:
 4. [GridFS in Ruby](http://api.mongodb.org/ruby/current/file.GridFS.html).
 5. [Frequently Asked Questions](http://api.mongodb.org/ruby/current/file.FAQ.html).
 6. [History](http://api.mongodb.org/ruby/current/file.HISTORY.html).
+6. [Release plan](http://api.mongodb.org/ruby/current/file.RELEASES.html).
 7. [Credits](http://api.mongodb.org/ruby/current/file.CREDITS.html).
 
 Here's a quick code sample. Again, see the [MongoDB Ruby Tutorial](http://api.mongodb.org/ruby/current/file.TUTORIAL.html)
@@ -17,17 +18,18 @@ for much more:
 
     require 'rubygems'
     require 'mongo'
-    include Mongo
 
-    db   = Connection.new.db('sample-db')
-    coll = db.collection('test')
+    @conn = Mongo::Connection.new
+    @db   = @conn['sample-db']
+    @coll = @db['test']
 
-    coll.remove
+    @coll.remove
     3.times do |i|
-      coll.insert({'a' => i+1})
+      @coll.insert({'a' => i+1})
     end
-    puts "There are #{coll.count()} records. Here they are:"
-    coll.find().each { |doc| puts doc.inspect }
+
+    puts "There are #{@coll.count} records. Here they are:"
+    @coll.find.each { |doc| puts doc.inspect }
 
 # Installation
 
@@ -141,32 +143,11 @@ To set up a pooled connection to a single MongoDB instance:
 Though the pooling architecture will undoubtedly evolve, it currently owes much credit
 to the connection pooling implementations in ActiveRecord and PyMongo.
 
-## Using with Phusion Passenger and Unicorn
+## Forking
 
-When Passenger and Unicorn are in smart spawning mode you need to be sure that child
-processes will create a new connection to the database. In Passenger, this can be handled like so:
-
-    if defined?(PhusionPassenger)
-      PhusionPassenger.on_event(:starting_worker_process) do |forked|
-        if forked
-          # Reset all connection objects. How you do this depends on where
-          # you keep your connection object. In any case, call the #connect
-          # method on the connection object. For example:
-          # CONN.connect
-          #
-          # If you're using MongoMapper:
-          # MongoMapper.connection.connect
-        end
-      end
-    end
-
-In Unicorn, add this to your unicorn.rb file:
-
-    after_fork do |server, worker|
-      # Handle reconnection
-    end
-
-The above code should be put into a Rails initializer or similar initialization script.
+Certain Ruby application servers work by forking, and it has long been necessary to
+re-establish the child process's connection to the database after fork. But with the release
+of v1.3.0, the Ruby driver detects forking and reconnects automatically.
 
 ## String Encoding
 
@@ -271,6 +252,14 @@ Notes:
 * Cursors will timeout on the server after 10 minutes. If you need to keep a cursor
   open for more than 10 minutes, specify `:timeout => false` when you create the cursor.
 
+## Socket timeouts
+
+The Ruby driver support timeouts on socket read operations. To enable them, set the
+`:op_timeout` option when you create a `Mongo::Connection` object.
+
+If implementing higher-level timeouts, using tools like `Rack::Timeout`, it's very important
+to call `Mongo::Connection#close` to prevent the subsequent operation from receiving the previous
+request.
 
 # Testing
 

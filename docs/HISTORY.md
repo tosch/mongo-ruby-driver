@@ -1,9 +1,47 @@
 # MongoDB Ruby Driver History
 
+### 1.3.1
+2011-5-10
+
+* Fix GridIO#gets infinite loop error (Ryan McGeary)
+* Fix BSON::OrderedHash#reject! leaving keys with null values (rpt. by Ben Poweski)
+* Minor semantic fix for OrderedHash#reject!
+* Fix Mongo::DB to allow symbols in method traversing collection names (rpt. by Chris Griego)
+* Support new server regex option "s" (dotall). This is folded in with \m in Ruby.
+* Fix so that Cursor#close hits the right node when :read_secondary is enabled.
+* Support maxScan, showDiskLoc, and returnKey cursor options.
+* Make DB#validate_collection compatible with server v1.9.1.
+* Fix so that GridIO#gets returns local md5 with md5 matches server md5 (Steve Tantra).
+* Fix bug in BSON::OrderedHash that prevents YAML.load (Ian Warshak).
+* Fix example from /examples.
+* Ensure that we do not modify hash arguments by calling Hash#dup when appropriate.
+* Ensure that JRuby deserializer preserves binary subtypes properly.
+* Fix for streaming an empty file into GridFS (Daniël van de Burgt).
+* Minor doc fixes.
+
+### 1.3.0
+2011-4-04
+
+* Add option to set timeouts on socket read calls using the
+  Mongo::Connection :op_timeout option.
+* Add StringIO methods to GridIO objects
+* Support for BSON timestamp type with BSON::Timestamp
+* Change the BSON binary subtype from 2 to 0
+* Remove private method Connection#reset_conection
+  and deprecate public method ReplSetConnection#reset_connection
+* ByteBuffer#== and OrderedHash#dup (Hongli Lai)
+* Better check for UTF8 validity in Ruby 1.9
+* Added previously removed Connection#host and Connection#port
+* Added transformers to allow Mongo::Cursor to allow instantiated objects (John Nunemaker)
+* Automated reconnection on fork
+* Added Cursor#next alias for Cursor#next_document
+* Audit tests after enabling warnings (Wojciech Piekutowski)
+* Various bug fixes thanks to Datanoise, Hongli Lai, and Mauro Pompilio
+
 ### 1.2.4
 2011-2-23
 
-* Fix the exception message shown when there's an IOError (malditogeek)
+* Fix the exception message shown when there's an IOError (Mauro Pompilio)
 * Another update to map-reduce docs for v1.8. Note that if you use the new
   output option {:out => {:inline => true}}, then you must also specify
   :raw => true.

@@ -28,7 +28,7 @@ class ConnectTest < Test::Unit::TestCase
   end
 
   def test_connect
-    @conn = ReplSetConnection.new([RS.host, RS.ports[0]], [RS.host, RS.ports[1]],
+    @conn = ReplSetConnection.new([RS.host, RS.ports[1]], [RS.host, RS.ports[0]],
       [RS.host, RS.ports[2]], :name => RS.name)
     assert @conn.connected?
     assert @conn.read_primary?
@@ -37,6 +37,18 @@ class ConnectTest < Test::Unit::TestCase
     assert_equal RS.primary, @conn.primary
     assert_equal RS.secondaries.sort, @conn.secondaries.sort
     assert_equal RS.arbiters.sort, @conn.arbiters.sort
+
+    @conn = ReplSetConnection.new([RS.host, RS.ports[1]], [RS.host, RS.ports[0]],
+      :name => RS.name)
+    assert @conn.connected?
+  end
+
+  def test_host_port_accessors
+    @conn = ReplSetConnection.new([RS.host, RS.ports[0]], [RS.host, RS.ports[1]],
+      [RS.host, RS.ports[2]], :name => RS.name)
+
+    assert_equal @conn.host, RS.primary[0]
+    assert_equal @conn.port, RS.primary[1]
   end
 
   def test_connect_with_primary_node_killed

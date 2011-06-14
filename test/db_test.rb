@@ -26,20 +26,41 @@ class DBTest < Test::Unit::TestCase
       @@db.collection('test').insert('a' => 1)
       fail "expected 'NilClass' exception"
     rescue => ex
-      assert_match /NilClass/, ex.to_s
+      assert_match(/NilClass/, ex.to_s)
     ensure
       @@db = standard_connection.db(MONGO_TEST_DB)
       @@users = @@db.collection('system.users')
     end
   end
-  
+
+  def test_create_collection
+    col = @@db.create_collection('foo')
+    assert_equal @@db['foo'].name, col.name
+
+    col = @@db.create_collection(:foo)
+    assert_equal @@db['foo'].name, col.name
+
+    @@db.drop_collection('foo')
+  end
+
+  def test_get_and_drop_collection
+    db = @@conn.db(MONGO_TEST_DB, :strict => true)
+    db.create_collection('foo')
+    assert db.collection('foo')
+    assert db.drop_collection('foo')
+
+    db.create_collection(:foo)
+    assert db.collection(:foo)
+    assert db.drop_collection(:foo)
+  end
+
   def test_logger
     output = StringIO.new
     logger = Logger.new(output)
     logger.level = Logger::DEBUG
     conn = standard_connection(:logger => logger)
     assert_equal logger, conn.logger
-    
+
     conn.logger.debug 'testing'
     assert output.string.include?('testing')
   end
@@ -104,7 +125,7 @@ class DBTest < Test::Unit::TestCase
       db.pk_factory = Object.new
       fail "error: expected exception"
     rescue => ex
-      assert_match /Cannot change/, ex.to_s
+      assert_match(/Cannot change/, ex.to_s)
     ensure
       conn.close
     end
@@ -121,6 +142,13 @@ class DBTest < Test::Unit::TestCase
     assert @@db.authenticate('spongebob', 'squarepants')
     @@db.logout
     @@db.remove_user('spongebob')
+  end
+
+  def test_authenticate_with_special_characters
+    assert @@db.add_user('foo:bar', '@foo')
+    assert @@db.authenticate('foo:bar', '@foo')
+    @@db.logout
+    @@db.remove_user('foo:bar')
   end
 
   def test_authenticate_with_connection_uri
@@ -270,17 +298,17 @@ class DBTest < Test::Unit::TestCase
       assert_kind_of Array, info
       assert info.length >= 1
       first = info.first
-      assert_kind_of String, first['info']
       assert_kind_of Time, first['ts']
       assert_kind_of Numeric, first['millis']
     end
 
     should "validate collection" do
       doc = @db.validate_collection(@coll.name)
-      assert_not_nil doc
-      result = doc['result']
-      assert_not_nil result
-      assert_match /firstExtent/, result
+      if @@version >= "1.9.1"
+        assert doc['valid']
+      else
+        assert doc['result']
+      end
     end
 
   end

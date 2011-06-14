@@ -18,7 +18,7 @@
 
 $:.unshift(File.join(File.dirname(__FILE__), '..', 'lib'))
 
-MINIMUM_BSON_EXT_VERSION = "1.2.4"
+MINIMUM_BSON_EXT_VERSION = "1.3.1"
 
 require 'bson/version'
 
@@ -57,7 +57,6 @@ end
 if RUBY_PLATFORM =~ /java/
   jar_dir = File.join(File.dirname(__FILE__), '..', 'ext', 'java', 'jar')
   require File.join(jar_dir, 'mongo-2.4.jar')
-  require File.join(jar_dir, 'bson-2.2.jar')
   require File.join(jar_dir, 'jbson.jar')
   require 'bson/bson_java'
   module BSON
@@ -100,6 +99,7 @@ require 'bson/types/code'
 require 'bson/types/dbref'
 require 'bson/types/object_id'
 require 'bson/types/min_max_keys'
+require 'bson/types/timestamp'
 
 require 'base64'
 require 'bson/ordered_hash'

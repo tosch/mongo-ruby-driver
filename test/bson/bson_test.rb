@@ -1,10 +1,14 @@
 # encoding:utf-8
 require './test/test_helper'
-require 'complex'
+
+if RUBY_VERSION < '1.9'
+  require 'complex'
+  require 'rational'
+end
 require 'bigdecimal'
-require 'rational'
 
 begin
+  require 'tzinfo'
   require 'active_support/core_ext'
   Time.zone = "Pacific Time (US & Canada)"
   Zone = Time.zone.now
@@ -116,15 +120,23 @@ class BSONTest < Test::Unit::TestCase
     end
   else
     def test_non_utf8_string
-      bson = BSON::BSON_CODER.serialize({'str' => 'aé'.encode('iso-8859-1')})
-      result = BSON::BSON_CODER.deserialize(bson)['str']
-      assert_equal 'aé', result
-      assert_equal 'UTF-8', result.encoding.name
+      assert_raise BSON::InvalidStringEncoding do
+        BSON::BSON_CODER.serialize({'str' => 'aé'.encode('iso-8859-1')})
+      end
+    end
+
+    def test_invalid_utf8_string
+      str = "123\xD9"
+      assert !str.valid_encoding?
+      assert_raise BSON::InvalidStringEncoding do
+        BSON::BSON_CODER.serialize({'str' => str})
+      end
     end
 
     def test_non_utf8_key
-      bson = BSON::BSON_CODER.serialize({'aé'.encode('iso-8859-1') => 'hello'})
-      assert_equal 'hello', BSON::BSON_CODER.deserialize(bson)['aé']
+      assert_raise BSON::InvalidStringEncoding do
+        BSON::BSON_CODER.serialize({'aé'.encode('iso-8859-1') => 'hello'})
+      end
     end
 
     # Based on a test from sqlite3-ruby
@@ -134,14 +146,14 @@ class BSONTest < Test::Unit::TestCase
       str = "壁に耳あり、障子に目あり"
       bson = BSON::BSON_CODER.serialize("x" => str)
 
-      Encoding.default_internal = 'EUC-JP'
+      silently { Encoding.default_internal = 'EUC-JP' }
       out = BSON::BSON_CODER.deserialize(bson)["x"]
 
       assert_equal Encoding.default_internal, out.encoding
       assert_equal str.encode('EUC-JP'), out
       assert_equal str, out.encode(str.encoding)
     ensure
-      Encoding.default_internal = before_enc
+      silently { Encoding.default_internal = before_enc }
     end
   end
 
@@ -161,12 +173,12 @@ class BSONTest < Test::Unit::TestCase
     assert_doc_pass(doc)
   end
 
-   def test_double
-     doc = {'doc' => 41.25}
-     assert_doc_pass(doc)
-   end
+  def test_double
+    doc = {'doc' => 41.25}
+    assert_doc_pass(doc)
+  end
 
- def test_int
+  def test_int
     doc = {'doc' => 42}
     assert_doc_pass(doc)
 
@@ -233,6 +245,11 @@ class BSONTest < Test::Unit::TestCase
     assert_doc_pass(doc)
   end
 
+  def test_regex_multiline
+    doc = {'doc' => /foobar/m}
+    assert_doc_pass(doc)
+  end
+
   def test_boolean
     doc = {'doc' => true}
     assert_doc_pass(doc)
@@ -283,7 +300,7 @@ class BSONTest < Test::Unit::TestCase
       ensure
         if !invalid_date.is_a? Time
           assert_equal InvalidDocument, e.class
-          assert_match /UTC Time/, e.message
+          assert_match(/UTC Time/, e.message)
         end
       end
     end
@@ -323,6 +340,20 @@ class BSONTest < Test::Unit::TestCase
     bin2 = doc2['bin']
     assert_kind_of Binary, bin2
     assert_equal 'binstring', bin2.to_s
+    assert_equal Binary::SUBTYPE_SIMPLE, bin2.subtype
+  end
+
+  def test_binary_with_deprecated_subtype
+    bin = Binary.new
+    'binstring'.each_byte { |b| bin.put(b) }
+    bin.subtype = Binary::SUBTYPE_BYTES
+
+    doc = {'bin' => bin}
+    bson = @encoder.serialize(doc)
+    doc2 = @encoder.deserialize(bson)
+    bin2 = doc2['bin']
+    assert_kind_of Binary, bin2
+    assert_equal 'binstring', bin2.to_s
     assert_equal Binary::SUBTYPE_BYTES, bin2.subtype
   end
 
@@ -334,7 +365,7 @@ class BSONTest < Test::Unit::TestCase
     bin2 = doc2['bin']
     assert_kind_of Binary, bin2
     assert_equal 'somebinarystring', bin2.to_s
-    assert_equal Binary::SUBTYPE_BYTES, bin2.subtype
+    assert_equal Binary::SUBTYPE_SIMPLE, bin2.subtype
   end
 
   def test_binary_type
@@ -374,7 +405,7 @@ class BSONTest < Test::Unit::TestCase
     bin2 = doc2['bin']
     assert_kind_of Binary, bin2
     assert_equal [1, 2, 3, 4, 5], bin2.to_a
-    assert_equal Binary::SUBTYPE_BYTES, bin2.subtype
+    assert_equal Binary::SUBTYPE_SIMPLE, bin2.subtype
   end
 
   def test_put_id_first
@@ -399,13 +430,22 @@ class BSONTest < Test::Unit::TestCase
   if !(RUBY_PLATFORM =~ /java/)
     def test_timestamp
       val = {"test" => [4, 20]}
-      assert_equal val, @encoder.deserialize([0x13, 0x00, 0x00, 0x00,
-                                        0x11, 0x74, 0x65, 0x73,
-                                        0x74, 0x00, 0x04, 0x00,
-                                        0x00, 0x00, 0x14, 0x00,
-                                        0x00, 0x00, 0x00])
+      result = @encoder.deserialize([0x13, 0x00, 0x00, 0x00,
+                                     0x11, 0x74, 0x65, 0x73,
+                                     0x74, 0x00, 0x04, 0x00,
+                                     0x00, 0x00, 0x14, 0x00,
+                                     0x00, 0x00, 0x00])
 
+      assert_equal 4, result["test"][0]
+      assert_equal 20, result["test"][1]
     end
+  end
+
+  def test_timestamp_type
+    ts = Timestamp.new(5000, 100)
+    doc = {:ts => ts}
+    bson = @encoder.serialize(doc)
+    assert_equal ts, @encoder.deserialize(bson)["ts"]
   end
 
   def test_overflow
@@ -445,7 +485,7 @@ class BSONTest < Test::Unit::TestCase
       rescue => e
       ensure
         assert_equal InvalidDocument, e.class
-        assert_match /Cannot serialize/, e.message
+        assert_match(/Cannot serialize/, e.message)
       end
     end
   end

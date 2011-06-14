@@ -384,6 +384,9 @@ public class RubyBSONEncoder extends BSONEncoder {
               else if ( klass.equals("BSON::MaxKey") ) {
                   _put( MAXKEY, name );
               }
+              else if ( klass.equals("BSON::Timestamp") ) {
+                  putRubyTimestamp( name, (RubyObject)val );
+              }
               else if ( klass.equals("BSON::DBRef") ) {
                   RubyHash ref = (RubyHash)JavaEmbedUtils.invokeMethod(_runtime, val,
                       "to_hash", new Object[] {}, Object.class);
@@ -504,6 +507,18 @@ public class RubyBSONEncoder extends BSONEncoder {
         _buf.writeInt( ts.getTime() );
     }
 
+    protected void putRubyTimestamp(String name, RubyObject ts ){
+        _put( TIMESTAMP , name );
+
+        Number inc = (Number)JavaEmbedUtils.invokeMethod(_runtime, ts,
+            "increment", new Object[] {}, Object.class);
+        Number sec = (Number)JavaEmbedUtils.invokeMethod(_runtime, ts,
+            "seconds", new Object[] {}, Object.class);
+
+        _buf.writeInt( (int)inc.longValue() );
+        _buf.writeInt( (int)sec.longValue() );
+    }
+
     protected void putRubyCodeWScope( String name , RubyObject code ){
         _put( CODE_W_SCOPE , name );
         int temp = _buf.getPosition();
@@ -543,7 +558,7 @@ public class RubyBSONEncoder extends BSONEncoder {
         long subtype = rbSubtype.longValue();
         byte[] data = ra2ba( rarray );
         if ( subtype == 2 ) {
-            putBinary( name, data );
+            putBinaryTypeTwo( name, data );
         }
         else {
             _put( BINARY , name );
@@ -553,17 +568,25 @@ public class RubyBSONEncoder extends BSONEncoder {
         }
     }
 
-    protected void putBinary( String name , byte[] data ){
+    /* We have a special method because type 2 has a different format. */
+    protected void putBinaryTypeTwo( String name , byte[] data ){
         _put( BINARY , name );
         _buf.writeInt( 4 + data.length );
 
-        _buf.write( B_BINARY );
+        _buf.write( 2 );
         _buf.writeInt( data.length );
         int before = _buf.getPosition();
         _buf.write( data );
         int after = _buf.getPosition();
 
         com.mongodb.util.MyAsserts.assertEquals( after - before , data.length );
+    }
+
+    protected void putBinary( String name , byte[] data ){
+        _put( BINARY , name );
+        _buf.writeInt( data.length );
+        _buf.write( 0 );
+        _buf.write( data );
     }
 
     protected void putBinary( String name , Binary val ){
@@ -627,8 +650,10 @@ public class RubyBSONEncoder extends BSONEncoder {
         if( (regexOptions & ReOptions.RE_OPTION_IGNORECASE) != 0 )
           options = options.concat( "i" );
 
-        if( (regexOptions & ReOptions.RE_OPTION_MULTILINE) != 0 )
+        if( (regexOptions & ReOptions.RE_OPTION_MULTILINE) != 0 ) {
           options = options.concat( "m" );
+          options = options.concat( "s" );
+        }
 
         if( (regexOptions & ReOptions.RE_OPTION_EXTENDED) != 0 )
           options = options.concat( "x" );

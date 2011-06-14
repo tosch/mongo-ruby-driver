@@ -120,7 +120,7 @@ class CursorTest < Test::Unit::TestCase
     results = @@coll.find.sort([:n, :asc]).to_a
 
     assert_equal MinKey.new, results[0]['n']
-    assert_equal -1000000,   results[1]['n']
+    assert_equal(-1000000,   results[1]['n'])
     assert_equal 1000000,    results[2]['n']
     assert_equal MaxKey.new, results[3]['n']
   end
@@ -171,8 +171,8 @@ class CursorTest < Test::Unit::TestCase
     cursor = Cursor.new(@@coll, :timeout => false)
     assert_equal false, cursor.timeout
 
-    @@coll.find({}, :timeout => false) do |cursor|
-      assert_equal false, cursor.timeout
+    @@coll.find({}, :timeout => false) do |c|
+      assert_equal false, c.timeout
     end
   end
 
@@ -454,4 +454,30 @@ class CursorTest < Test::Unit::TestCase
     assert_equal 100, cursor.map {|doc| doc }.length
   end
 
+  def test_transformer
+    transformer = Proc.new { |doc| doc }
+    cursor = Cursor.new(@@coll, :transformer => transformer)
+    assert_equal(transformer, cursor.transformer)
   end
+
+  def test_instance_transformation_with_next
+    klass       = Struct.new(:id, :a)
+    transformer = Proc.new { |doc| klass.new(doc['_id'], doc['a']) }
+    cursor      = Cursor.new(@@coll, :transformer => transformer)
+    instance    = cursor.next
+
+    assert_instance_of(klass, instance)
+    assert_instance_of(BSON::ObjectId, instance.id)
+    assert_equal(1, instance.a)
+  end
+
+  def test_instance_transformation_with_each
+    klass       = Struct.new(:id, :a)
+    transformer = Proc.new { |doc| klass.new(doc['_id'], doc['a']) }
+    cursor      = Cursor.new(@@coll, :transformer => transformer)
+
+    cursor.each do |instance|
+      assert_instance_of(klass, instance)
+    end
+  end
+end

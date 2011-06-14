@@ -89,6 +89,7 @@ module Mongo
 
       # Are we allowing reads from secondaries?
       @read_secondary = opts.fetch(:read_secondary, false)
+      @slave_okay = false
 
       setup(opts)
     end
@@ -101,7 +102,7 @@ module Mongo
     #
     # @raise [ConnectionFailure] if unable to connect to any host or port.
     def connect
-      reset_connection
+      close
       @nodes_to_try = @nodes.clone
 
       while connecting?
@@ -135,6 +136,20 @@ module Mongo
       @nodes_to_try.length > 0
     end
 
+    # The replica set primary's host name.
+    #
+    # @return [String]
+    def host
+      super
+    end
+
+    # The replica set primary's port.
+    #
+    # @return [Integer]
+    def port
+      super
+    end
+
     # Determine whether we're reading from a primary node. If false,
     # this connection connects to a secondary node and @read_secondaries is true.
     #
@@ -151,18 +166,20 @@ module Mongo
       @secondary_pools.each do |pool|
         pool.close
       end
-    end
-
-    # If a ConnectionFailure is raised, this method will be called
-    # to close the connection and reset connection values.
-    # TODO: what's the point of this method?
-    def reset_connection
-      super
       @secondaries     = []
       @secondary_pools = []
       @arbiters        = []
       @nodes_tried  = []
       @nodes_to_try = []
+    end
+
+    # If a ConnectionFailure is raised, this method will be called
+    # to close the connection and reset connection values.
+    # @deprecated
+    def reset_connection
+      close
+      warn "ReplSetConnection#reset_connection is now deprecated. " +
+        "Use ReplSetConnection#close instead."
     end
 
     # Is it okay to connect to a slave?

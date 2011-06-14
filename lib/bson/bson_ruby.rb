@@ -57,6 +57,11 @@ module BSON
       BINARY_ENCODING = Encoding.find('binary')
 
       def self.to_utf8_binary(str)
+        begin
+          str.unpack("U*")
+        rescue => ex
+          raise InvalidStringEncoding, "String not valid utf-8: #{str.inspect}"
+        end
         str.encode(UTF8_ENCODING).force_encoding(BINARY_ENCODING)
       end
     else
@@ -187,6 +192,8 @@ module BSON
         serialize_max_key_element(@buf, k)
       when MINKEY
         serialize_min_key_element(@buf, k)
+      when TIMESTAMP
+        serialize_timestamp_element(@buf, k, v)
       else
         raise "unhandled type #{type}"
       end
@@ -256,8 +263,7 @@ module BSON
           doc[key] = deserialize_code_w_scope_data(@buf)
         when TIMESTAMP
           key = deserialize_cstr(@buf)
-          doc[key] = [deserialize_number_int_data(@buf),
-          deserialize_number_int_data(@buf)]
+          doc[key] = deserialize_timestamp_data(@buf)
         when MAXKEY
           key = deserialize_cstr(@buf)
           doc[key] = MaxKey.new
@@ -337,8 +343,15 @@ module BSON
       opts = 0
       opts |= Regexp::IGNORECASE if options_str.include?('i')
       opts |= Regexp::MULTILINE if options_str.include?('m')
+      opts |= Regexp::MULTILINE if options_str.include?('s')
       opts |= Regexp::EXTENDED if options_str.include?('x')
       Regexp.new(str, opts)
+    end
+
+    def deserialize_timestamp_data(buf)
+      increment = buf.get_int
+      seconds = buf.get_int
+      Timestamp.new(seconds, increment)
     end
 
     def encoded_str(str)
@@ -488,7 +501,10 @@ module BSON
       options = val.options
       options_str = ''
       options_str << 'i' if ((options & Regexp::IGNORECASE) != 0)
-      options_str << 'm' if ((options & Regexp::MULTILINE) != 0)
+      if ((options & Regexp::MULTILINE) != 0)
+        options_str << 'm'
+        options_str << 's'
+      end
       options_str << 'x' if ((options & Regexp::EXTENDED) != 0)
       options_str << val.extra_options_str if val.respond_to?(:extra_options_str)
       # Must store option chars in alphabetical order
@@ -503,6 +519,14 @@ module BSON
     def serialize_min_key_element(buf, key)
       buf.put(MINKEY)
       self.class.serialize_key(buf, key)
+    end
+
+    def serialize_timestamp_element(buf, key, val)
+      buf.put(TIMESTAMP)
+      self.class.serialize_key(buf, key)
+
+      buf.put_int(val.increment)
+      buf.put_int(val.seconds)
     end
 
     def serialize_oid_element(buf, key, val)
@@ -593,6 +617,8 @@ module BSON
         MAXKEY
       when MinKey
         MINKEY
+      when Timestamp
+        TIMESTAMP
       when Numeric
         raise InvalidDocument, "Cannot serialize the Numeric type #{o.class} as BSON; only Fixum, Bignum, and Float are supported."
       when Date, DateTime

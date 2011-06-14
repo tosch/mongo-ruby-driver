@@ -231,13 +231,17 @@ module BSON
     def more?
       @cursor < @str.size
     end
-
-    def to_a
-      @str.unpack("C*")
+    
+    def ==(other)
+      other.respond_to?(:to_s) && @str == other.to_s
     end
 
-    def unpack(args)
-      to_a
+    def to_a(format="C*")
+      @str.unpack(format)
+    end
+
+    def unpack(format="C*")
+      to_a(format)
     end
 
     def to_s
@@ -245,7 +249,6 @@ module BSON
     end
 
     def dump
-      i = 0
       @str.each_byte do |c, i|
         $stderr.puts "#{'%04d' % i}: #{'%02x' % c} #{'%03o' % c} #{'%s' % c.chr} #{'%3d' % c}"
         i += 1

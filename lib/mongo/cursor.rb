@@ -23,7 +23,7 @@ module Mongo
 
     attr_reader :collection, :selector, :fields,
       :order, :hint, :snapshot, :timeout,
-      :full_collection_name
+      :full_collection_name, :transformer
 
     # Create a new cursor.
     #
@@ -34,24 +34,39 @@ module Mongo
     #
     # @core cursors constructor_details
     def initialize(collection, opts={})
+      @cursor_id  = nil
+
       @db         = collection.db
       @collection = collection
       @connection = @db.connection
       @logger     = @connection.logger
 
+      # Query selector
       @selector   = opts[:selector] || {}
+
+      # Special operators that form part of $query
+      @order      = opts[:order]
+      @explain    = opts[:explain]
+      @hint       = opts[:hint]
+      @snapshot   = opts[:snapshot]
+      @max_scan   = opts.fetch(:max_scan, nil)
+      @return_key = opts.fetch(:return_key, nil)
+      @show_disk_loc = opts.fetch(:show_disk_loc, nil)
+
+      # Wire-protocol settings
       @fields     = convert_fields_for_query(opts[:fields])
       @skip       = opts[:skip]     || 0
       @limit      = opts[:limit]    || 0
-      @order      = opts[:order]
-      @hint       = opts[:hint]
-      @snapshot   = opts[:snapshot]
-      @timeout    = opts.fetch(:timeout, true)
-      @explain    = opts[:explain]
-      @socket     = opts[:socket]
       @tailable   = opts[:tailable] || false
+      @timeout    = opts.fetch(:timeout, true)
+
+      # Use this socket for the query
+      @socket     = opts[:socket]
+
       @closed       = false
       @query_run    = false
+
+      @transformer = opts[:transformer]
       batch_size(opts[:batch_size] || 0)
 
       @full_collection_name = "#{@collection.db.name}.#{@collection.name}"
@@ -86,7 +101,11 @@ module Mongo
         raise OperationFailure, err
       end
 
-      doc
+      if @transformer.nil?
+        doc
+      else
+        @transformer.call(doc) if doc
+      end
     end
     alias :next :next_document
 
@@ -277,7 +296,7 @@ module Mongo
         message.put_int(1)
         message.put_long(@cursor_id)
         @logger.debug("MONGODB cursor.close #{@cursor_id}") if @logger
-        @connection.send_message(Mongo::Constants::OP_KILL_CURSORS, message, nil)
+        @connection.send_message(Mongo::Constants::OP_KILL_CURSORS, message, :connection => :reader)
       end
       @cursor_id = 0
       @closed    = true
@@ -308,12 +327,15 @@ module Mongo
     def query_options_hash
       { :selector => @selector,
         :fields   => @fields,
-        :skip     => @skip_num,
-        :limit    => @limit_num,
+        :skip     => @skip,
+        :limit    => @limit,
         :order    => @order,
         :hint     => @hint,
         :snapshot => @snapshot,
-        :timeout  => @timeout }
+        :timeout  => @timeout,
+        :max_scan => @max_scan,
+        :return_key => @return_key,
+        :show_disk_loc => @show_disk_loc }
     end
 
     # Clean output for inspect.
@@ -422,6 +444,9 @@ module Mongo
       spec['$hint']     = @hint if @hint && @hint.length > 0
       spec['$explain']  = true if @explain
       spec['$snapshot'] = true if @snapshot
+      spec['$maxscan']  = @max_scan if @max_scan
+      spec['$returnKey']   = true if @return_key
+      spec['$showDiskLoc'] = true if @show_disk_loc
       spec
     end
 

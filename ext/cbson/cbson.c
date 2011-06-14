@@ -86,6 +86,7 @@ static VALUE DBRef;
 static VALUE Code;
 static VALUE MinKey;
 static VALUE MaxKey;
+static VALUE Timestamp;
 static VALUE Regexp;
 static VALUE OrderedHash;
 static VALUE InvalidKeyName;
@@ -107,21 +108,12 @@ static int max_bson_size;
         }                                                               \
         _str;                                                           \
     })
-/* MUST call TO_UTF8 before calling write_utf8. */
 #define TO_UTF8(string) rb_str_export_to_enc((string), rb_utf8_encoding())
-static void write_utf8(buffer_t buffer, VALUE string, char check_null) {
-    result_t status = check_string(RSTRING_PTR(string), RSTRING_LENINT(string),
-                                   0, check_null);
-    if (status == HAS_NULL) {
-        buffer_free(buffer);
-        rb_raise(InvalidDocument, "Key names / regex patterns must not contain the NULL byte");
-    }
-    SAFE_WRITE(buffer, RSTRING_PTR(string), RSTRING_LENINT(string));
-}
 #else
 #define STR_NEW(p,n) rb_str_new((p), (n))
-/* MUST call TO_UTF8 before calling write_utf8. */
 #define TO_UTF8(string) (string)
+#endif
+
 static void write_utf8(buffer_t buffer, VALUE string, char check_null) {
     result_t status = check_string(RSTRING_PTR(string), RSTRING_LEN(string),
                                    1, check_null);
@@ -132,9 +124,9 @@ static void write_utf8(buffer_t buffer, VALUE string, char check_null) {
         buffer_free(buffer);
         rb_raise(InvalidStringEncoding, "String not valid UTF-8");
     }
+    string = TO_UTF8(string);
     SAFE_WRITE(buffer, RSTRING_PTR(string), RSTRING_LEN(string));
 }
-#endif
 
 // this sucks. but for some reason these moved around between 1.8 and 1.9
 #ifdef ONIGURUMA_H
@@ -211,7 +203,6 @@ static VALUE pack_extra(buffer_t buffer, VALUE check_keys) {
 
 static void write_name_and_type(buffer_t buffer, VALUE name, char type) {
     SAFE_WRITE(buffer, &type, 1);
-    name = TO_UTF8(name);
     write_utf8(buffer, name, 1);
     SAFE_WRITE(buffer, &zero, 1);
 }
@@ -340,7 +331,6 @@ static int write_element(VALUE key, VALUE value, VALUE extra, int allow_id) {
         {
             int length;
             write_name_and_type(buffer, key, 0x02);
-            value = TO_UTF8(value);
             length = RSTRING_LENINT(value) + 1;
             SAFE_WRITE(buffer, (char*)&length, 4);
             write_utf8(buffer, value, 0);
@@ -444,6 +434,17 @@ static int write_element(VALUE key, VALUE value, VALUE extra, int allow_id) {
                 write_name_and_type(buffer, key, 0xff);
                 break;
             }
+            if (strcmp(cls, "BSON::Timestamp") == 0) {
+                write_name_and_type(buffer, key, 0x11);
+                int seconds = FIX2INT(
+                    rb_funcall(value, rb_intern("seconds"), 0));
+                int increment = FIX2INT(
+                    rb_funcall(value, rb_intern("increment"), 0));
+
+                SAFE_WRITE(buffer, (const char*)&increment, 4);
+                SAFE_WRITE(buffer, (const char*)&seconds, 4);
+                break;
+            }
             if (strcmp(cls, "DateTime") == 0 || strcmp(cls, "Date") == 0 || strcmp(cls, "ActiveSupport::TimeWithZone") == 0) {
                 buffer_free(buffer);
                 rb_raise(InvalidDocument, "%s is not currently supported; use a UTC Time instance instead.", cls);
@@ -485,7 +486,6 @@ static int write_element(VALUE key, VALUE value, VALUE extra, int allow_id) {
 
             write_name_and_type(buffer, key, 0x0B);
 
-            pattern = TO_UTF8(pattern);
             write_utf8(buffer, pattern, 1);
             SAFE_WRITE(buffer, &zero, 1);
 
@@ -495,7 +495,9 @@ static int write_element(VALUE key, VALUE value, VALUE extra, int allow_id) {
             }
             if (flags & MULTILINE) {
                 char multiline = 'm';
+                char dotall = 's';
                 SAFE_WRITE(buffer, &multiline, 1);
+                SAFE_WRITE(buffer, &dotall, 1);
             }
             if (flags & EXTENDED) {
                 char extended = 'x';
@@ -759,6 +761,9 @@ static VALUE get_value(const char* buffer, int* position, int type) {
                 else if (flag == 'm') {
                     flags |= MULTILINE;
                 }
+                else if (flag == 's') {
+                    flags |= MULTILINE;
+                }
                 else if (flag == 'x') {
                     flags |= EXTENDED;
                 }
@@ -825,11 +830,13 @@ static VALUE get_value(const char* buffer, int* position, int type) {
         }
     case 17:
         {
-            int i;
-            int j;
-            memcpy(&i, buffer + *position, 4);
-            memcpy(&j, buffer + *position + 4, 4);
-            value = rb_ary_new3(2, LL2NUM(i), LL2NUM(j));
+            int sec, inc;
+            VALUE argv[2];
+            memcpy(&inc, buffer + *position, 4);
+            memcpy(&sec, buffer + *position + 4, 4);
+            argv[0] = INT2FIX(sec);
+            argv[1] = INT2FIX(inc);
+            value = rb_class_new_instance(2, argv, Timestamp);
             *position += 8;
             break;
         }
@@ -952,6 +959,8 @@ void Init_cbson() {
     rb_require("bson/types/min_max_keys");
     MinKey = rb_const_get(bson, rb_intern("MinKey"));
     MaxKey = rb_const_get(bson, rb_intern("MaxKey"));
+    rb_require("bson/types/timestamp");
+    Timestamp = rb_const_get(bson, rb_intern("Timestamp"));
     Regexp = rb_const_get(rb_cObject, rb_intern("Regexp"));
     rb_require("bson/exceptions");
     InvalidKeyName = rb_const_get(bson, rb_intern("InvalidKeyName"));

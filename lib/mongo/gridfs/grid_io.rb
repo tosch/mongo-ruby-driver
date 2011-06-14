@@ -17,10 +17,6 @@
 # ++
 
 require 'digest/md5'
-begin
-require 'mime/types'
-rescue LoadError
-end
 
 module Mongo
 
@@ -59,6 +55,7 @@ module Mongo
       @chunks       = chunks
       @filename     = filename
       @mode         = mode
+      opts          = opts.dup
       @query        = opts.delete(:query) || {}
       @query_opts   = opts.delete(:query_opts) || {}
       @fs_name      = opts.delete(:fs_name) || Grid::DEFAULT_FS_NAME
@@ -172,6 +169,57 @@ module Mongo
     def tell
       @file_position
     end
+    alias :pos :tell
+
+    # Rewind the file. This is equivalent to seeking to the zeroth position.
+    #
+    # @return [Integer] the position of the file after rewinding (always zero).
+    def rewind
+      raise GridError, "file not opened for read" unless @mode[0] == ?r
+      seek(0)
+    end
+
+    # Return a boolean indicating whether the position pointer is
+    # at the end of the file.
+    #
+    # @return [Boolean]
+    def eof
+      raise GridError, "file not opened for read #{@mode}" unless @mode[0] == ?r
+      @file_position >= @file_length
+    end
+    alias :eof? :eof
+
+    # Return the next line from a GridFS file. This probably
+    # makes sense only if you're storing plain text. This method
+    # has a somewhat tricky API, which it inherits from Ruby's
+    # StringIO#gets.
+    #
+    # @param [String, Integer] separator or length. If a separator,
+    #   read up to the separator. If a length, read the +length+ number
+    #   of bytes. If nil, read the entire file.
+    # @param [Integer] length If a separator is provided, then
+    #   read until either finding the separator or
+    #   passing over the +length+ number of bytes.
+    #
+    # @return [String]
+    def gets(separator="\n", length=nil)
+      if separator.nil?
+        read_all
+      elsif separator.is_a?(Integer)
+        read_length(separator)
+      elsif separator.length > 1
+        read_to_string(separator, length)
+      else
+        read_to_character(separator, length)
+      end
+    end
+
+    # Return the next byte from the GridFS file.
+    #
+    # @return [String]
+    def getc
+      read_length(1)
+    end
 
     # Creates or updates the document from the files collection that
     # stores the chunks' metadata. The file becomes available only after
@@ -203,8 +251,9 @@ module Mongo
     # @return [Mongo::GridIO] self
     def each
       return read_all unless block_given?
-      while chunk = read(chunk_size)
+      while chunk = read(chunk_size) 
         yield chunk
+        break if chunk.empty?
       end
       self
     end
@@ -235,21 +284,18 @@ module Mongo
       chunk
     end
 
-    def last_chunk_number
-      (@file_length / @chunk_size).to_i
-    end
-
     # Read a file in its entirety.
     def read_all
       buf = ''
       if @current_chunk
         buf << @current_chunk['data'].to_s
-        while chunk = get_chunk(@current_chunk['n'] + 1)
-          buf << chunk['data'].to_s
-          @current_chunk = chunk
+        while buf.size < @file_length
+          @current_chunk = get_chunk(@current_chunk['n'] + 1)
+          break if @current_chunk.nil?
+          buf << @current_chunk['data'].to_s
         end
+        @file_position = @file_length
       end
-      @file_position = @file_length
       buf
     end
 
@@ -260,7 +306,7 @@ module Mongo
       if length.nil?
         to_read = remaining
       else
-        to_read    = length > remaining ? remaining : length
+        to_read = length > remaining ? remaining : length
       end
       return nil unless remaining > 0
 
@@ -278,6 +324,48 @@ module Mongo
         @file_position  += size
       end
       buf
+    end
+
+    def read_to_character(character="\n", length=nil)
+      result = ''
+      len = 0
+      while char = getc
+        result << char
+        len += 1
+        break if char == character || (length ? len >= length : false)
+      end
+      result.length > 0 ? result : nil
+    end
+
+    def read_to_string(string="\n", length=nil)
+      result = ''
+      len = 0
+      match_idx = 0
+      match_num = string.length - 1
+      to_match = string[match_idx].chr
+      if length
+        matcher = lambda {|idx, num| idx < num && len < length }
+      else
+        matcher = lambda {|idx, num| idx < num}
+      end
+      while matcher.call(match_idx, match_num) && char = getc
+        result << char
+        len += 1
+        if char == to_match
+          while match_idx < match_num do
+            match_idx += 1
+            to_match = string[match_idx].chr
+            char = getc
+            result << char
+            if char != to_match
+              match_idx = 0
+              to_match = string[match_idx].chr
+              break
+            end
+          end
+        end
+      end
+      result.length > 0 ? result : nil
     end
 
     def cache_chunk_data
@@ -332,11 +420,12 @@ module Mongo
 
     # Initialize the class for writing a file.
     def init_write(opts)
+      opts           = opts.dup
       @files_id      = opts.delete(:_id) || BSON::ObjectId.new
       @content_type  = opts.delete(:content_type) || (defined? MIME) && get_content_type || DEFAULT_CONTENT_TYPE
       @chunk_size    = opts.delete(:chunk_size) || DEFAULT_CHUNK_SIZE
-      @metadata      = opts.delete(:metadata) if opts[:metadata]
-      @aliases       = opts.delete(:aliases) if opts[:aliases]
+      @metadata      = opts.delete(:metadata)
+      @aliases       = opts.delete(:aliases)
       @file_length   = 0
       opts.each {|k, v| self[k] = v}
       check_existing_file if @safe
@@ -374,7 +463,9 @@ module Mongo
       @server_md5 = @files.db.command(md5_command)['md5']
       if @safe
         @client_md5 = @local_md5.hexdigest
-        if @local_md5 != @server_md5
+        if @local_md5 == @server_md5
+          @server_md5
+        else
           raise GridMD5Failure, "File on server failed MD5 check"
         end
       else

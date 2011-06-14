@@ -187,11 +187,24 @@ class OrderedHashTest < Test::Unit::TestCase
     assert !new.keys.include?('z')
   end
 
+  def test_reject_bang
+    @oh.reject! { |k, v| k == 'z' }
+    assert !@oh.keys.include?('z')
+    assert_nil @oh.reject! { |k, v| k == 'z' }
+  end
+
   def test_clone
     copy = @oh.clone
     assert copy.keys == @oh.keys
 
     copy[:foo] = 1
     assert copy.keys != @oh.keys
+  end
+
+  def test_dup
+    oh2 = @oh.dup
+    oh2['f'] = 9
+    assert_nil @oh['f']
+    assert_equal ['c', 'a', 'z'], @oh.keys
   end
 end

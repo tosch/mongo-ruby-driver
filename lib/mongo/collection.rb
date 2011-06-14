@@ -91,7 +91,7 @@ module Mongo
     # Return a sub-collection of this collection by name. If 'users' is a collection, then
     # 'users.comments' is a sub-collection of users.
     #
-    # @param [String] name
+    # @param [String, Symbol] name
     #   the collection to return
     #
     # @raise [Mongo::InvalidNSName]
@@ -101,7 +101,8 @@ module Mongo
     #   the specified sub-collection
     def [](name)
       name = "#{self.name}.#{name}"
-      return Collection.new(name, db) if !db.strict? || db.collection_names.include?(name)
+      return Collection.new(name, db) if !db.strict? ||
+        db.collection_names.include?(name.to_s)
       raise "Collection #{name} doesn't exist. Currently in strict mode."
     end
 
@@ -147,16 +148,25 @@ module Mongo
     # @option opts [Integer] :limit maximum number of documents to return
     # @option opts [Array]   :sort an array of [key, direction] pairs to sort by. Direction should
     #   be specified as Mongo::ASCENDING (or :ascending / :asc) or Mongo::DESCENDING (or :descending / :desc)
-    # @option opts [String, Array, OrderedHash] :hint hint for query optimizer, usually not necessary if using MongoDB > 1.1
+    # @option opts [String, Array, OrderedHash] :hint hint for query optimizer, usually not necessary if
+    #   using MongoDB > 1.1
     # @option opts [Boolean] :snapshot (false) if true, snapshot mode will be used for this query.
     #   Snapshot mode assures no duplicates are returned, or objects missed, which were preset at both the start and
-    #   end of the query's execution. For details see http://www.mongodb.org/display/DOCS/How+to+do+Snapshotting+in+the+Mongo+Database
-    # @option opts [Boolean] :batch_size (100) the number of documents to returned by the database per GETMORE operation. A value of 0
-    #   will let the database server decide how many results to returns. This option can be ignored for most use cases.
+    #   end of the query's execution.
+    #   For details see http://www.mongodb.org/display/DOCS/How+to+do+Snapshotting+in+the+Mongo+Database
+    # @option opts [Boolean] :batch_size (100) the number of documents to returned by the database per
+    #   GETMORE operation. A value of 0 will let the database server decide how many results to returns.
+    #   This option can be ignored for most use cases.
     # @option opts [Boolean] :timeout (true) when +true+, the returned cursor will be subject to
-    #   the normal cursor timeout behavior of the mongod process. When +false+, the returned cursor will never timeout. Note
-    #   that disabling timeout will only work when #find is invoked with a block. This is to prevent any inadvertant failure to
-    #   close the cursor, as the cursor is explicitly closed when block code finishes.
+    #   the normal cursor timeout behavior of the mongod process. When +false+, the returned cursor will
+    #   never timeout. Note that disabling timeout will only work when #find is invoked with a block.
+    #   This is to prevent any inadvertant failure to close the cursor, as the cursor is explicitly
+    #   closed when block code finishes.
+    # @option opts [Integer] :max_scan (nil) Limit the number of items to scan on both collection scans and indexed queries..
+    # @option opts [Boolean] :show_disk_loc (false) Return the disk location of each query result (for debugging).
+    # @option opts [Boolean] :return_key (false) Return the index key used to obtain the result (for debugging).
+    # @option opts [Block] :transformer (nil) a block for tranforming returned documents.
+    #   This is normally used by object mappers to convert each returned document to an instance of a class.
     #
     # @raise [ArgumentError]
     #   if timeout is set to false and find is not invoked in a block
@@ -166,6 +176,7 @@ module Mongo
     #
     # @core find find-instance_method
     def find(selector={}, opts={})
+      opts   = opts.dup
       fields = opts.delete(:fields)
       fields = ["_id"] if fields && fields.empty?
       skip   = opts.delete(:skip) || skip || 0
@@ -175,6 +186,10 @@ module Mongo
       snapshot   = opts.delete(:snapshot)
       batch_size = opts.delete(:batch_size)
       timeout    = (opts.delete(:timeout) == false) ? false : true
+      max_scan   = opts.delete(:max_scan)
+      return_key = opts.delete(:return_key)
+      transformer = opts.delete(:transformer)
+      show_disk_loc = opts.delete(:max_scan)
 
       if timeout == false && !block_given?
         raise ArgumentError, "Collection#find must be invoked with a block when timeout is disabled."
@@ -188,8 +203,21 @@ module Mongo
 
       raise RuntimeError, "Unknown options [#{opts.inspect}]" unless opts.empty?
 
-      cursor = Cursor.new(self, :selector => selector, :fields => fields, :skip => skip, :limit => limit,
-        :order => sort, :hint => hint, :snapshot => snapshot, :timeout => timeout, :batch_size => batch_size)
+      cursor = Cursor.new(self, {
+        :selector    => selector, 
+        :fields      => fields, 
+        :skip        => skip, 
+        :limit       => limit,
+        :order       => sort, 
+        :hint        => hint, 
+        :snapshot    => snapshot, 
+        :timeout     => timeout, 
+        :batch_size  => batch_size,
+        :transformer => transformer,
+        :max_scan    => max_scan,
+        :show_disk_loc => show_disk_loc,
+        :return_key    => return_key
+      })
 
       if block_given?
         yield cursor
@@ -372,7 +400,7 @@ module Mongo
         if safe
           @connection.send_message_with_safe_check(Mongo::Constants::OP_UPDATE, message, @db.name, nil, safe)
         else
-          @connection.send_message(Mongo::Constants::OP_UPDATE, message, nil)
+          @connection.send_message(Mongo::Constants::OP_UPDATE, message)
         end
       end
     end
@@ -420,8 +448,9 @@ module Mongo
     #
     # @core indexes create_index-instance_method
     def create_index(spec, opts={})
-      opts[:dropDups] = opts.delete(:drop_dups) if opts[:drop_dups]
+      opts[:dropDups] = opts[:drop_dups] if opts[:drop_dups]
       field_spec = parse_index_spec(spec)
+      opts = opts.dup
       name = opts.delete(:name) || generate_index_name(field_spec)
       name = name.to_s if name
 
@@ -447,9 +476,10 @@ module Mongo
     # @return [String] the name of the index.
     def ensure_index(spec, opts={})
       now = Time.now.utc.to_i
+      opts[:dropDups] = opts[:drop_dups] if opts[:drop_dups]
       field_spec = parse_index_spec(spec)
 
-      name = opts.delete(:name) || generate_index_name(field_spec)
+      name = opts[:name] || generate_index_name(field_spec)
       name = name.to_s if name
 
       if !@cache[name] || @cache[name] <= now
@@ -467,6 +497,9 @@ module Mongo
     #
     # @core indexes
     def drop_index(name)
+      if name.is_a?(Array)
+        return drop_index(index_name(name))
+      end
       @cache[name.to_s] = nil
       @db.drop_index(@name, name)
     end
@@ -794,6 +827,14 @@ module Mongo
     end
 
     private
+  
+    def index_name(spec)
+      field_spec = parse_index_spec(spec)
+      index_information.each do |index|
+        return index[0] if index[1]['key'] == field_spec
+      end
+      nil
+    end
 
     def parse_index_spec(spec)
       field_spec = BSON::OrderedHash.new
@@ -854,7 +895,7 @@ module Mongo
         if safe
           @connection.send_message_with_safe_check(Mongo::Constants::OP_INSERT, message, @db.name, nil, safe)
         else
-          @connection.send_message(Mongo::Constants::OP_INSERT, message, nil)
+          @connection.send_message(Mongo::Constants::OP_INSERT, message)
         end
       end
       documents.collect { |o| o[:_id] || o['_id'] }

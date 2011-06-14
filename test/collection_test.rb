@@ -1,7 +1,7 @@
 require './test/test_helper'
 
 class TestCollection < Test::Unit::TestCase
-  @@connection ||= standard_connection
+  @@connection ||= standard_connection(:op_timeout => 2)
   @@db   = @@connection.db(MONGO_TEST_DB)
   @@test = @@db.collection("test")
   @@version = @@connection.server_version
@@ -373,8 +373,8 @@ class TestCollection < Test::Unit::TestCase
 
     docs = [{"hello" => "world"}, {"hello" => "world"}]
     @@test.insert(docs)
-    docs.each do |doc|
-      assert(doc.include?(:_id))
+    docs.each do |d|
+      assert(d.include?(:_id))
     end
   end
 
@@ -466,31 +466,34 @@ class TestCollection < Test::Unit::TestCase
       assert res["timeMillis"]
     end
 
-    def test_map_reduce_with_collection_merge
-      @@test << {:user_id => 1}
-      @@test << {:user_id => 2}
-      output_collection = "test-map-coll"
-      m = Code.new("function() { emit(this.user_id, {count: 1}); }")
-      r = Code.new("function(k,vals) { var sum = 0;" +
-        " vals.forEach(function(v) { sum += v.count;} ); return {count: sum}; }")
-      res = @@test.map_reduce(m, r, :out => output_collection)
 
-      @@test.remove
-      @@test << {:user_id => 3}
-      res = @@test.map_reduce(m, r, :out => {:merge => output_collection})
-      assert res.find.to_a.any? {|doc| doc["_id"] == 3 && doc["value"]["count"] == 1}
+    if @@version >= "1.8.0"
+      def test_map_reduce_with_collection_merge
+        @@test << {:user_id => 1}
+        @@test << {:user_id => 2}
+        output_collection = "test-map-coll"
+        m = Code.new("function() { emit(this.user_id, {count: 1}); }")
+        r = Code.new("function(k,vals) { var sum = 0;" +
+          " vals.forEach(function(v) { sum += v.count;} ); return {count: sum}; }")
+        res = @@test.map_reduce(m, r, :out => output_collection)
 
-      @@test.remove
-      @@test << {:user_id => 3}
-      res = @@test.map_reduce(m, r, :out => {:reduce => output_collection})
-      assert res.find.to_a.any? {|doc| doc["_id"] == 3 && doc["value"]["count"] == 2}
+        @@test.remove
+        @@test << {:user_id => 3}
+        res = @@test.map_reduce(m, r, :out => {:merge => output_collection})
+        assert res.find.to_a.any? {|doc| doc["_id"] == 3 && doc["value"]["count"] == 1}
 
-      assert_raise ArgumentError do
-        @@test.map_reduce(m, r, :out => {:inline => 1})
+        @@test.remove
+        @@test << {:user_id => 3}
+        res = @@test.map_reduce(m, r, :out => {:reduce => output_collection})
+        assert res.find.to_a.any? {|doc| doc["_id"] == 3 && doc["value"]["count"] == 2}
+
+        assert_raise ArgumentError do
+          @@test.map_reduce(m, r, :out => {:inline => 1})
+        end
+
+        @@test.map_reduce(m, r, :raw => true, :out => {:inline => 1})
+        assert res["results"]
       end
-
-      @@test.map_reduce(m, r, :raw => true, :out => {:inline => 1})
-      assert res["results"]
     end
   end
 
@@ -592,6 +595,20 @@ class TestCollection < Test::Unit::TestCase
     assert_equal 1, x
   end
 
+  def test_find_with_transformer
+    klass       = Struct.new(:id, :a)
+    transformer = Proc.new { |doc| klass.new(doc['_id'], doc['a']) }
+    cursor      = @@test.find({}, :transformer => transformer)
+    assert_equal(transformer, cursor.transformer)
+  end
+  
+  def test_find_one_with_transformer
+    klass       = Struct.new(:id, :a)
+    transformer = Proc.new { |doc| klass.new(doc['_id'], doc['a']) }
+    id          = @@test.insert('a' => 1)
+    doc         = @@test.find_one(id, :transformer => transformer)
+    assert_instance_of(klass, doc)
+  end
 
   def test_ensure_index
     @@test.drop_indexes
@@ -745,6 +762,41 @@ class TestCollection < Test::Unit::TestCase
       assert_equal 1, @collection.size
     end
   end
+  
+  context "Drop index " do
+    setup do
+      @@db.drop_collection('test-collection')
+      @collection = @@db.collection('test-collection')
+    end
+
+    should "drop an index" do
+      @collection.create_index([['a', Mongo::ASCENDING]])
+      assert @collection.index_information['a_1']
+      @collection.drop_index([['a', Mongo::ASCENDING]])
+      assert_nil @collection.index_information['a_1']
+    end
+    
+    should "drop an index which was given a specific name" do
+      @collection.create_index([['a', Mongo::DESCENDING]], {:name => 'i_will_not_fear'})
+      assert @collection.index_information['i_will_not_fear']
+      @collection.drop_index([['a', Mongo::DESCENDING]])
+      assert_nil @collection.index_information['i_will_not_fear']
+    end
+  
+    should "drops an composite index" do
+      @collection.create_index([['a', Mongo::DESCENDING], ['b', Mongo::ASCENDING]])
+      assert @collection.index_information['a_-1_b_1']
+      @collection.drop_index([['a', Mongo::DESCENDING], ['b', Mongo::ASCENDING]])
+      assert_nil @collection.index_information['a_-1_b_1']
+    end
+    
+    should "drops an index with symbols" do
+      @collection.create_index([['a', Mongo::DESCENDING], [:b, Mongo::ASCENDING]])
+      assert @collection.index_information['a_-1_b_1']
+      @collection.drop_index([['a', Mongo::DESCENDING], [:b, Mongo::ASCENDING]])
+      assert_nil @collection.index_information['a_-1_b_1']
+    end
+  end
 
   context "Creating indexes " do
     setup do
@@ -789,6 +841,14 @@ class TestCollection < Test::Unit::TestCase
       @collection.insert({:a => 1})
       assert_equal 2, @collection.find({:a => 1}).count
       @collection.create_index([['a', Mongo::ASCENDING]], :unique => true, :drop_dups => true)
+      assert_equal 1, @collection.find({:a => 1}).count
+    end
+
+    should "drop duplicates with ensure_index and drop_dups key" do
+      @collection.insert({:a => 1})
+      @collection.insert({:a => 1})
+      assert_equal 2, @collection.find({:a => 1}).count
+      @collection.ensure_index([['a', Mongo::ASCENDING]], :unique => true, :drop_dups => true)
       assert_equal 1, @collection.find({:a => 1}).count
     end
 

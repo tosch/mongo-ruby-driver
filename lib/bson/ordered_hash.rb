@@ -57,16 +57,21 @@ module BSON
       end
 
       def initialize(*a, &b)
-        super
         @ordered_keys = []
+        super
+      end
+
+      def yaml_initialize(tag, val)
+        @ordered_keys = []        
+        super
       end
 
       def keys
-        @ordered_keys || []
+        @ordered_keys# || []
       end
 
       def []=(key, value)
-        @ordered_keys ||= []
+        #@ordered_keys ||= []
         unless has_key?(key)
           @ordered_keys << key
         end
@@ -74,14 +79,14 @@ module BSON
       end
 
       def each
-        @ordered_keys ||= []
+        #@ordered_keys ||= []
         @ordered_keys.each { |k| yield k, self[k] }
         self
       end
       alias :each_pair :each
 
       def to_a
-        @ordered_keys ||= []
+        #@ordered_keys ||= []
         @ordered_keys.map { |k| [k, self[k]] }      
       end
 
@@ -96,13 +101,22 @@ module BSON
       end
 
       def merge!(other)
-        @ordered_keys ||= []
+        #@ordered_keys ||= []
         @ordered_keys += other.keys # unordered if not an BSON::OrderedHash
         @ordered_keys.uniq!
         super(other)
       end
 
       alias :update :merge!
+      
+      def dup
+        result = OrderedHash.new
+        #@ordered_keys ||= []
+        @ordered_keys.each do |key|
+          result[key] = self[key]
+        end
+        result
+      end
 
       def inspect
         str = '{'
@@ -116,17 +130,28 @@ module BSON
       end
 
       def delete_if(&block)
-        self.each { |k,v|
+        self.each do |k,v|
           if yield k, v
             delete(k)
           end
-        }
+        end
       end
 
       def reject(&block)
         clone = self.clone
         return clone unless block_given?
         clone.delete_if(&block)
+      end
+
+      def reject!(&block)
+        changed = false
+        self.each do |k,v|
+          if yield k, v
+            changed = true
+            delete(k)
+          end
+        end
+        changed ? self : nil
       end
 
       def clear

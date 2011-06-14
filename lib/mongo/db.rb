@@ -69,7 +69,7 @@ module Mongo
     #   the factory should not inject a new key).
     #
     # @option opts [Boolean, Hash] :safe (false) Set the default safe-mode options
-    #   propogated to Collection objects instantiated off of this DB. If no
+    #   propagated to Collection objects instantiated off of this DB. If no
     #   value is provided, the default value set on this instance's Connection object will be used. This
     #   default can be overridden upon instantiation of any collection by explicity setting a :safe value
     #   on initialization
@@ -251,28 +251,30 @@ module Mongo
     # new collection. If +strict+ is true, will raise an error if
     # collection +name+ already exists.
     #
-    # @param [String] name the name of the new collection.
+    # @param [String, Symbol] name the name of the new collection.
     #
     # @option opts [Boolean] :capped (False) created a capped collection.
     #
-    # @option opts [Integer] :size (Nil) If +capped+ is +true+, specifies the maximum number of
-    #   bytes for the capped collection. If +false+, specifies the number of bytes allocated
+    # @option opts [Integer] :size (Nil) If +capped+ is +true+,
+    #   specifies the maximum number of bytes for the capped collection.
+    #   If +false+, specifies the number of bytes allocated
     #   for the initial extent of the collection.
     #
-    # @option opts [Integer] :max (Nil) If +capped+ is +true+, indicates the maximum number of records
-    #   in a capped collection.
+    # @option opts [Integer] :max (Nil) If +capped+ is +true+, indicates
+    #   the maximum number of records in a capped collection.
     #
-    # @raise [MongoDBError] raised under two conditions: either we're in +strict+ mode and the collection
+    # @raise [MongoDBError] raised under two conditions:
+    #   either we're in +strict+ mode and the collection
     #   already exists or collection creation fails on the server.
     #
     # @return [Mongo::Collection]
     def create_collection(name, opts={})
-      # Does the collection already exist?
-      if collection_names.include?(name)
+      if collection_names.include?(name.to_s)
         if strict?
-          raise MongoDBError, "Collection #{name} already exists. Currently in strict mode."
+          raise MongoDBError, "Collection #{name} already exists. " +
+            "Currently in strict mode."
         else
-          return Collection.new(name, self)
+          return Collection.new(name, self, opts)
         end
       end
 
@@ -286,16 +288,19 @@ module Mongo
 
     # Get a collection by name.
     #
-    # @param [String] name the collection name.
-    # @param [Hash] opts any valid options that can me passed to Collection#new.
+    # @param [String, Symbol] name the collection name.
+    # @param [Hash] opts any valid options that can be passed to Collection#new.
     #
-    # @raise [MongoDBError] if collection does not already exist and we're in +strict+ mode.
+    # @raise [MongoDBError] if collection does not already exist and we're in
+    #   +strict+ mode.
     #
     # @return [Mongo::Collection]
     def collection(name, opts={})
-      if strict? && !collection_names.include?(name)
-        raise Mongo::MongoDBError, "Collection #{name} doesn't exist. Currently in strict mode."
+      if strict? && !collection_names.include?(name.to_s)
+        raise Mongo::MongoDBError, "Collection #{name} doesn't exist. " +
+          "Currently in strict mode."
       else
+        opts = opts.dup
         opts[:safe] = opts.fetch(:safe, @safe)
         opts.merge!(:pk => @pk_factory) unless opts[:pk]
         Collection.new(name, self, opts)
@@ -305,11 +310,11 @@ module Mongo
 
     # Drop a collection by +name+.
     #
-    # @param [String] name
+    # @param [String, Symbol] name
     #
     # @return [Boolean] +true+ on success or +false+ if the collection name doesn't exist.
     def drop_collection(name)
-      return true unless collection_names.include?(name)
+      return true unless collection_names.include?(name.to_s)
 
       ok?(command(:drop => name))
     end
@@ -590,11 +595,16 @@ module Mongo
     # @raise [MongoDBError] if the command fails or there's a problem with the validation
     #   data, or if the collection is invalid.
     def validate_collection(name)
-      doc = command({:validate => name}, :check_response => false)
-      raise MongoDBError, "Error with validate command: #{doc.inspect}" unless ok?(doc)
-      result = doc['result']
-      raise MongoDBError, "Error with validation data: #{doc.inspect}" unless result.kind_of?(String)
-      raise MongoDBError, "Error: invalid collection #{name}: #{doc.inspect}" if result =~ /\b(exception|corrupt)\b/i
+      cmd = BSON::OrderedHash.new
+      cmd[:validate] = name
+      cmd[:full] = true
+      doc = command(cmd, :check_response => false)
+      if !ok?(doc)
+        raise MongoDBError, "Error with validate command: #{doc.inspect}"
+      end
+      if (doc.has_key?('valid') && !doc['valid']) || (doc['result'] =~ /\b(exception|corrupt)\b/i)
+        raise MongoDBError, "Error: invalid collection #{name}: #{doc.inspect}"
+      end
       doc
     end
 

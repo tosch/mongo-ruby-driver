@@ -239,7 +239,7 @@ class DBAPITest < Test::Unit::TestCase
     names = @@db.collection_names
     assert names.length >= 2
     assert names.include?(@@coll.name)
-    assert names.include?('mongo-ruby-test.test2')
+    assert names.include?('test2')
   ensure
     @@db.drop_collection('test2')
   end
@@ -269,6 +269,17 @@ class DBAPITest < Test::Unit::TestCase
       @@db.strict = false
     end
   end
+
+  def test_collection_options_are_passed_to_the_existing_ones
+    @@db.drop_collection('foobar')
+
+    @@db.create_collection('foobar')
+
+    opts = {:safe => true}
+    coll = @@db.create_collection('foobar', opts)
+    assert_equal true, coll.safe
+  end
+
 
   def test_index_information
     assert_equal @@coll.index_information.length, 1
@@ -382,6 +393,18 @@ class DBAPITest < Test::Unit::TestCase
     else
       assert_equal 2, rows.length
       assert_equal regex, rows[1]['b']
+    end
+  end
+
+  def test_regex_multi_line
+    if @@version >= "1.9.1"
+doc = <<HERE
+  the lazy brown
+  fox
+HERE
+      @@coll.save({:doc => doc})
+      assert @@coll.find_one({:doc => /n.*x/m})
+      @@coll.remove
     end
   end
 
@@ -621,7 +644,7 @@ class DBAPITest < Test::Unit::TestCase
     assert_equal("mike", @@coll.find_one()["hello"])
   end
 
-  def test_collection_names
+  def test_collection_names_errors
     assert_raise TypeError do
       @@db.collection(5)
     end

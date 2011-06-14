@@ -1,5 +1,4 @@
 require './test/test_helper'
-include Mongo
 
 class GridFileSystemTest < Test::Unit::TestCase
   context "GridFileSystem:" do
@@ -11,6 +10,22 @@ class GridFileSystemTest < Test::Unit::TestCase
     teardown do
       @db.drop_collection('fs.files')
       @db.drop_collection('fs.chunks')
+    end
+
+    context "Initialization" do
+      setup do
+        @chunks_data = "CHUNKS" * 50000
+        @grid = GridFileSystem.new(@db)
+        @opts = {:safe => true}
+        @original_opts = @opts.dup
+        @grid.open('sample.file', 'w', @opts) do |f|
+          f.write @chunks_data
+        end
+      end
+
+      should "not modify original opts" do
+        assert_equal @original_opts, @opts
+      end
     end
 
     context "When reading:" do
