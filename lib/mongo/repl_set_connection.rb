@@ -43,9 +43,13 @@ module Mongo
     # @option options [Logger, #debug] :logger (nil) Logger instance to receive driver operation log.
     # @option options [Integer] :pool_size (1) The maximum number of socket connections allowed per
     #   connection pool. Note: this setting is relevant only for multi-threaded applications.
-    # @option options [Float] :timeout (5.0) When all of the connections a pool are checked out,
+    # @option options [Float] :pool_timeout (5.0) When all of the connections a pool are checked out,
     #   this is the number of seconds to wait for a new connection to be released before throwing an exception.
     #   Note: this setting is relevant only for multi-threaded applications.
+    # @option opts [Float] :op_timeout (nil) The number of seconds to wait for a read operation to time out.
+    #   Disabled by default.
+    # @option opts [Float] :connect_timeout (nil) The number of seconds to wait before timing out a
+    #   connection attempt.
     #
     # @example Connect to a replica set and provide two seed nodes. Note that the number of seed nodes does
     #   not have to be equal to the number of replica set members. The purpose of seed nodes is to permit
@@ -89,7 +93,6 @@ module Mongo
 
       # Are we allowing reads from secondaries?
       @read_secondary = opts.fetch(:read_secondary, false)
-      @slave_okay = false
 
       setup(opts)
     end
@@ -186,7 +189,7 @@ module Mongo
     #
     # @return [Boolean]
     def slave_ok?
-      @read_secondary || @slave_ok
+      @read_secondary
     end
 
     def authenticate_pools
@@ -209,10 +212,9 @@ module Mongo
       begin
         if node[1]
           host, port = *node
-          socket = TCPSocket.new(host, port)
-          socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+          socket = get_tcp_socket(host, port)
         else
-          socket = UNIXSocket.new(node[0])
+          socket = get_unix_socket(node[0])
         end
 
         config = self['admin'].command({:ismaster => 1}, :socket => socket)
@@ -240,6 +242,30 @@ module Mongo
       end
 
       config
+    end
+
+    def get_tcp_socket(host, port)
+      if @connect_timeout
+        Mongo::TimeoutHandler.timeout(@connect_timeout, OperationTimeout) do
+          socket = TCPSocket.new(host, port)
+          socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+        end
+      else
+        socket = TCPSocket.new(host, port)
+        socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+      end
+
+      socket
+    end
+
+    def get_unix_socket(path)
+      if @connect_timeout
+        Mongo::TimeoutHandler.timeout(@connect_timeout, OperationTimeout) do
+          UNIXSocket.new(path)
+        end
+      else
+        UNIXSocket.new(path)
+      end
     end
 
     # Primary, when connecting to a replica can, can only be a true primary node.

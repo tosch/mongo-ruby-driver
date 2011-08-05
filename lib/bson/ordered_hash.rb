@@ -67,11 +67,10 @@ module BSON
       end
 
       def keys
-        @ordered_keys# || []
+        @ordered_keys.dup
       end
 
       def []=(key, value)
-        #@ordered_keys ||= []
         unless has_key?(key)
           @ordered_keys << key
         end
@@ -79,19 +78,22 @@ module BSON
       end
 
       def each
-        #@ordered_keys ||= []
         @ordered_keys.each { |k| yield k, self[k] }
         self
       end
       alias :each_pair :each
 
       def to_a
-        #@ordered_keys ||= []
         @ordered_keys.map { |k| [k, self[k]] }      
       end
 
       def values
         collect { |k, v| v }
+      end
+
+      def replace(other)
+        @ordered_keys.replace(other.keys)
+        super
       end
 
       def merge(other)
@@ -101,17 +103,15 @@ module BSON
       end
 
       def merge!(other)
-        #@ordered_keys ||= []
         @ordered_keys += other.keys # unordered if not an BSON::OrderedHash
         @ordered_keys.uniq!
         super(other)
       end
 
       alias :update :merge!
-      
+
       def dup
         result = OrderedHash.new
-        #@ordered_keys ||= []
         @ordered_keys.each do |key|
           result[key] = self[key]
         end
