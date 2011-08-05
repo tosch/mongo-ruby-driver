@@ -26,6 +26,7 @@ module Mongo
       @connection  = connection
 
       @host, @port = host, port
+      @unix_socket_path = nil
 
       unless @port
         @unix_socket_path = host
