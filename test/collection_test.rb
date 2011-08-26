@@ -1,13 +1,23 @@
 require './test/test_helper'
 
 class TestCollection < Test::Unit::TestCase
-  @@connection ||= standard_connection(:op_timeout => 2)
+  @@connection ||= standard_connection(:op_timeout => 10)
   @@db   = @@connection.db(MONGO_TEST_DB)
   @@test = @@db.collection("test")
   @@version = @@connection.server_version
 
   def setup
     @@test.remove
+  end
+
+  def test_capped_method
+    @@db.create_collection('normal')
+    assert !@@db['normal'].capped?
+    @@db.drop_collection('normal')
+
+    @@db.create_collection('c', :capped => true)
+    assert @@db['c'].capped?
+    @@db.drop_collection('c')
   end
 
   def test_optional_pk_factory

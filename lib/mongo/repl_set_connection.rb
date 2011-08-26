@@ -20,7 +20,8 @@ module Mongo
 
   # Instantiates and manages connections to a MongoDB replica set.
   class ReplSetConnection < Connection
-    attr_reader :nodes, :secondaries, :arbiters, :read_pool, :secondary_pools
+    attr_reader :nodes, :secondaries, :arbiters, :secondary_pools,
+      :replica_set_name, :read_pool, :seeds
 
     # Create a connection to a MongoDB replica set.
     #
@@ -50,6 +51,12 @@ module Mongo
     #   Disabled by default.
     # @option opts [Float] :connect_timeout (nil) The number of seconds to wait before timing out a
     #   connection attempt.
+    # @option opts [Boolean] :auto_refresh (false) Set this to true to enable a background thread that
+    #   periodically updates the state of the connection. If, for example, you initially connect while a secondary
+    #   is down, :auto_refresh will reconnect to that secondary behind the scenes to
+    #   prevent you from having to reconnect manually.
+    # @option opts [Integer] :refresh_interval (90) If :auto_refresh is enabled, this is the number of seconds
+    #   that the background thread will sleep between calls to check the replica set's state.
     #
     # @example Connect to a replica set and provide two seed nodes. Note that the number of seed nodes does
     #   not have to be equal to the number of replica set members. The purpose of seed nodes is to permit
@@ -74,69 +81,121 @@ module Mongo
       end
 
       unless args.length > 0
-        raise MongoArgumentError, "A ReplSetConnection requires at least one node."
+        raise MongoArgumentError, "A ReplSetConnection requires at least one seed node."
       end
 
-      # Get seed nodes
-      @nodes = args
+      # The list of seed nodes
+      @seeds = args
 
-      # Replica set name
-      @replica_set = opts[:rs_name]
+      @nodes = @seeds.dup
 
-      # Cache the various node types when connecting to a replica set.
-      @secondaries = []
-      @arbiters    = []
+      # The members of the replica set, stored as instances of Mongo::Node.
+      @members = []
+
+      # Connection pool for primary node
+      @primary      = nil
+      @primary_pool = nil
 
       # Connection pools for each secondary node
+      @secondaries = []
       @secondary_pools = []
+
+      # The secondary pool to which we'll be sending reads.
+      # This may be identical to the primary pool.
       @read_pool = nil
+
+      # A list of arbiter addresses (for client information only)
+      @arbiters = []
+
+      # Refresh
+      @auto_refresh = opts.fetch(:auto_refresh, true)
+      @refresh_interval = opts[:refresh_interval] || 90
 
       # Are we allowing reads from secondaries?
       @read_secondary = opts.fetch(:read_secondary, false)
 
+      # Lock around changes to the global config
+      @connection_lock = Mutex.new
+      @connected = false
+
+      # Store the refresher thread
+      @refresh_thread = nil
+
+      # Replica set name
+      if opts[:rs_name]
+        warn ":rs_name option has been deprecated and will be removed in 2.0. " +
+          "Please use :name instead."
+        @replica_set_name = opts[:rs_name]
+      else
+        @replica_set_name = opts[:name]
+      end
+
       setup(opts)
     end
 
-    # Create a new socket and attempt to connect to master.
-    # If successful, sets host and port to master and returns the socket.
-    #
-    # If connecting to a replica set, this method will replace the
-    # initially-provided seed list with any nodes known to the set.
-    #
-    # @raise [ConnectionFailure] if unable to connect to any host or port.
+    # Initiate a connection to the replica set.
     def connect
-      close
-      @nodes_to_try = @nodes.clone
+      @connection_lock.synchronize do
+        return if @connected
+        manager = PoolManager.new(self, @seeds)
+        manager.connect
 
-      while connecting?
-        node   = @nodes_to_try.shift
-        config = check_is_master(node)
+        update_config(manager)
+        initiate_auto_refresh
 
-        if is_primary?(config)
-          set_primary(node)
-        else
-          set_auxillary(node, config)
-        end
-      end
-
-      pick_secondary_for_read if @read_secondary
-
-      if connected?
-        BSON::BSON_CODER.update_max_bson_size(self)
-      else
-        if @secondary_pools.empty?
-          close # close any existing pools and sockets
-          raise ConnectionFailure, "Failed to connect any given host:port"
-        else
-          close # close any existing pools and sockets
+        if @primary.nil? #TODO: in v2.0, we'll let this be optional and do a lazy connect.
           raise ConnectionFailure, "Failed to connect to primary node."
+        else
+          @connected = true
         end
       end
     end
-    alias :reconnect :connect
 
+    # Note: this method must be called from within
+    # a locked @connection_lock
+    def update_config(manager)
+      @arbiters = manager.arbiters.nil? ? [] : manager.arbiters.dup
+      @primary = manager.primary.nil? ? nil : manager.primary.dup
+      @secondaries = manager.secondaries.dup
+
+      @primary_pool = manager.primary_pool
+      @read_pool    = manager.read_pool
+      @secondary_pools = manager.secondary_pools
+      @seeds = manager.seeds
+      @manager = manager
+      @hosts = manager.hosts
+      @nodes = manager.nodes
+      @max_bson_size = manager.max_bson_size
+    end
+
+    # If ismaster doesn't match our current view
+    # then create a new PoolManager, passing in our
+    # existing view. It should be able to do the diff.
+    # Then take out the connection lock and replace
+    # our current values.
+    def refresh
+      return if !connected?
+
+      if !Thread.current[:background]
+        Thread.current[:background] = PoolManager.new(self, @seeds)
+      end
+
+      background_manager = Thread.current[:background]
+      if update_struct = background_manager.update_required?(@hosts)
+        @connection_lock.synchronize do
+          background_manager.update(@manager, update_struct)
+          update_config(background_manager)
+        end
+      end
+    end
+
+    def connected?
+      @connected && !@connection_lock.locked?
+    end
+
+    # @deprecated
     def connecting?
-      @nodes_to_try.length > 0
+      false
     end
 
     # The replica set primary's host name.
@@ -153,27 +212,48 @@ module Mongo
       super
     end
 
+    def nodes
+      warn "DEPRECATED"
+      @seeds
+    end
+
     # Determine whether we're reading from a primary node. If false,
     # this connection connects to a secondary node and @read_secondaries is true.
     #
     # @return [Boolean]
     def read_primary?
-      !@read_pool
+      @read_pool == @primary_pool
     end
     alias :primary? :read_primary?
 
     # Close the connection to the database.
     def close
       super
-      @read_pool = nil
-      @secondary_pools.each do |pool|
-        pool.close
+
+      @connected = false
+      if @refresh_thread
+        @refresh_thread.kill
+        @refresh_thread = nil
       end
+
+      if @nodes
+        @nodes.each do |member|
+          member.disconnect
+        end
+      end
+
+      @nodes = []
+      @read_pool = nil
+
+      if @secondary_pools
+        @secondary_pools.each do |pool|
+          pool.close
+        end
+      end
+
       @secondaries     = []
       @secondary_pools = []
       @arbiters        = []
-      @nodes_tried  = []
-      @nodes_to_try = []
     end
 
     # If a ConnectionFailure is raised, this method will be called
@@ -208,154 +288,35 @@ module Mongo
 
     private
 
-    def check_is_master(node)
-      begin
-        if node[1]
-          host, port = *node
-          socket = get_tcp_socket(host, port)
-        else
-          socket = get_unix_socket(node[0])
-        end
-
-        config = self['admin'].command({:ismaster => 1}, :socket => socket)
-
-        check_set_name(config, socket)
-      rescue OperationFailure, SocketError, SystemCallError, IOError => ex
-        # It's necessary to rescue here. The #connect method will keep trying
-        # until it has no more nodes to try and raise a ConnectionFailure if
-        # it can't connect to a primary.
-      ensure
-        socket.close if socket
-        @nodes_tried << node
-
-        if config
-          nodes = []
-          nodes += config['hosts'] if config['hosts']
-          nodes += config['arbiters'] if config['arbiters']
-          nodes += config['passives'] if config['passives']
-          update_node_list(nodes)
-
-          if config['msg'] && @logger
-            @logger.warn("MONGODB #{config['msg']}")
-          end
-        end
+    def initiate_auto_refresh
+      return unless @auto_refresh
+      return if @refresh_thread && @refresh_thread.alive?
+      @refresh_thread = Thread.new do
+        sleep(@refresh_interval)
+        refresh
       end
-
-      config
-    end
-
-    def get_tcp_socket(host, port)
-      if @connect_timeout
-        Mongo::TimeoutHandler.timeout(@connect_timeout, OperationTimeout) do
-          socket = TCPSocket.new(host, port)
-          socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
-        end
-      else
-        socket = TCPSocket.new(host, port)
-        socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
-      end
-
-      socket
-    end
-
-    def get_unix_socket(path)
-      if @connect_timeout
-        Mongo::TimeoutHandler.timeout(@connect_timeout, OperationTimeout) do
-          UNIXSocket.new(path)
-        end
-      else
-        UNIXSocket.new(path)
-      end
-    end
-
-    # Primary, when connecting to a replica can, can only be a true primary node.
-    # (And not a slave, which is possible when connecting with the standard
-    # Connection class.
-    def is_primary?(config)
-      config && (config['ismaster'] == 1 || config['ismaster'] == true)
-    end
-
-    # Pick a node randomly from the set of possible secondaries.
-    def pick_secondary_for_read
-      if (size = @secondary_pools.size) > 0
-        @read_pool = @secondary_pools[rand(size)]
-      end
-    end
-
-    # Make sure that we're connected to the expected replica set.
-    def check_set_name(config, socket)
-      if @replica_set
-        config = self['admin'].command({:replSetGetStatus => 1},
-                   :socket => socket, :check_response => false)
-
-        if !Mongo::Support.ok?(config)
-          raise ReplicaSetConnectionError, config['errmsg']
-        elsif config['set'] != @replica_set
-          raise ReplicaSetConnectionError,
-            "Attempting to connect to replica set '#{config['set']}' but expected '#{@replica_set}'"
-        end
-      end
-    end
-
-    # Determines what kind of node we have and caches its host
-    # and port so that users can easily connect manually.
-    def set_auxillary(node, config)
-      if config
-        if config['secondary']
-          @secondaries << node unless @secondaries.include?(node)
-          if node[1]
-            host, port = *node
-            @secondary_pools << Pool.new(self, host, port, :size => @pool_size, :timeout => @timeout)
-          else
-            unix_socket_path = *node
-            @secondary_pools << Pool.new(self, unix_socket_path, nil, :size => @pool_size, :timeout => @timeout)
-          end
-        elsif config['arbiterOnly']
-          @arbiters << node unless @arbiters.include?(node)
-        end
-      end
-    end
-
-    # Update the list of known nodes. Only applies to replica sets,
-    # where the response to the ismaster command will return a list
-    # of known hosts.
-    #
-    # @param hosts [Array] a list of hosts, specified as string-encoded
-    #   host-port values. Example: ["myserver-1.org:27017", "myserver-1.org:27017"]
-    #
-    # @return [Array] the updated list of nodes
-    def update_node_list(hosts)
-      new_nodes = hosts.map do |host|
-        if !host.respond_to?(:split)
-            warn "Could not parse host #{host.inspect}."
-            next
-        end
-        
-        host, port = host.split(':')
-        unless port || File.exists?(host)
-          port = Connection::DEFAULT_PORT
-        end
-        if port
-          [host, port.to_i]
-        else
-          [host]
-        end
-      end
-
-      # Replace the list of seed nodes with the canonical list.
-      @nodes = new_nodes.clone
-
-      @nodes_to_try = new_nodes - @nodes_tried
     end
 
     # Checkout a socket for reading (i.e., a secondary node).
+    # Note that @read_pool might point to the primary pool
+    # if no read pool has been defined. That's okay; we don't
+    # want to have to check for the existence of the @read_pool
+    # because that introduces concurrency issues.
     def checkout_reader
       connect unless connected?
 
-      if @read_pool
-        @read_pool.checkout
-      else
-        checkout_writer
+      if @read_secondary && @read_pool
+        begin
+          return @read_pool.checkout
+        rescue NoMethodError
+          warn "Read pool was not available."
+        end
+      end
+
+      begin
+        return @primary_pool.checkout
+      rescue NoMethodError
+        raise ConnectionFailure, "Not connected to any nodes."
       end
     end
 
@@ -363,12 +324,19 @@ module Mongo
     def checkout_writer
       connect unless connected?
 
-      @primary_pool.checkout
+      if @primary_pool
+        begin
+          return @primary_pool.checkout
+        rescue NoMethodError
+        end
+      end
+
+      raise ConnectionFailure, "Failed to connect to primary node."
     end
 
     # Checkin a socket used for reading.
     def checkin_reader(socket)
-      if @read_pool
+      if @read_secondary
         @read_pool.checkin(socket)
       else
         checkin_writer(socket)

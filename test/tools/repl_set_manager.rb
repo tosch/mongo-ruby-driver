@@ -17,7 +17,7 @@ class ReplSetManager
     @ports      = []
     @name       = opts[:name] || 'replica-set-foo'
     @host       = opts[:host]  || 'localhost'
-    @retries    = opts[:retries] || 60
+    @retries    = opts[:retries] || 30
     @config     = {"_id" => @name, "members" => []}
     @durable    = opts.fetch(:durable, false)
     @path       = File.join(File.expand_path(File.dirname(__FILE__)), "data")
@@ -103,6 +103,27 @@ class ReplSetManager
     @mongods[n]['start']
   end
 
+  def remove_secondary_node
+    primary = get_node_with_state(1)
+    con = get_connection(primary)
+    config = con['local']['system.replset'].find_one
+    secondary = get_node_with_state(2)
+    host_port = "#{@host}:#{@mongods[secondary]['port']}"
+    @config['members'].reject! {|m| m['host'] == host_port}
+
+    @config['version'] = config['version'] + 1
+
+    primary = get_node_with_state(1)
+    con = get_connection(primary)
+
+    begin
+    con['admin'].command({'replSetReconfig' => @config})
+    rescue Mongo::ConnectionFailure
+    end
+
+    con.close
+  end
+
   def add_node
     primary = get_node_with_state(1)
     con = get_connection(primary)
@@ -110,8 +131,6 @@ class ReplSetManager
 
     config = con['local']['system.replset'].find_one
     @config['version'] = config['version'] + 1
-    p "Old config: #{config}"
-    p "New config: #{@config}"
 
     # We expect a connection failure on reconfigure here.
     begin
@@ -119,6 +138,7 @@ class ReplSetManager
     rescue Mongo::ConnectionFailure
     end
 
+    con.close
     ensure_up
   end
 
@@ -146,12 +166,22 @@ class ReplSetManager
       con['admin'].command({'replSetStepDown' => 90})
     rescue Mongo::ConnectionFailure
     end
+    con.close
   end
 
   def kill_secondary
     node = get_node_with_state(2)
     kill(node)
     return node
+  end
+
+  def kill_all_secondaries
+    nodes = get_all_nodes_with_state(2)
+    if nodes
+      nodes.each do |n|
+        kill(n)
+      end
+    end
   end
 
   def restart_killed_nodes
@@ -185,11 +215,14 @@ class ReplSetManager
       con = get_connection
       status = con['admin'].command({'replSetGetStatus' => 1})
       print "."
-      if status['members'].all? { |m| m['health'] == 1 && [1, 2, 7].include?(m['state']) } &&
+      if status['members'].all? { |m| m['health'] == 1 &&
+         [1, 2, 7].include?(m['state']) } &&
          status['members'].any? { |m| m['state'] == 1 }
         print "all members up!\n\n"
+        con.close
         return status
       else
+        con.close
         raise Mongo::OperationFailure
       end
     end
@@ -226,6 +259,20 @@ class ReplSetManager
     attempt do
       con['admin'].command({'replSetInitiate' => @config})
     end
+
+    con.close
+  end
+
+  def get_all_nodes_with_state(state)
+    status = ensure_up
+    nodes = status['members'].select {|m| m['state'] == state}
+    nodes = nodes.map do |node|
+      host_port = node['name'].split(':')
+      port = host_port[1] ? host_port[1].to_i : 27017
+      @mongods.keys.detect {|key| @mongods[key]['port'] == port}
+    end
+
+    nodes == [] ? false : nodes
   end
 
   def get_node_with_state(state)
@@ -234,7 +281,7 @@ class ReplSetManager
     if node
       host_port = node['name'].split(':')
       port = host_port[1] ? host_port[1].to_i : 27017
-      key = @mongods.keys.detect {|key| @mongods[key]['port'] == port}
+      key = @mongods.keys.detect {|n| @mongods[n]['port'] == port}
       return key
     else
       return false
@@ -274,11 +321,12 @@ class ReplSetManager
       begin
         return yield
         rescue Mongo::OperationFailure, Mongo::ConnectionFailure => ex
-          sleep(1)
+          sleep(2)
           count += 1
       end
     end
 
+    puts "NO MORE ATTEMPTS"
     raise ex
   end
 

@@ -88,6 +88,16 @@ module Mongo
       @hint = nil
     end
 
+    # Indicate whether this is a capped collection.
+    #
+    # @raise [Mongo::OperationFailure]
+    #   if the collection doesn't exist.
+    #
+    # @return [Boolean]
+    def capped?
+      @db.command({:collstats => @name})['capped'] == 1
+    end
+
     # Return a sub-collection of this collection by name. If 'users' is a collection, then
     # 'users.comments' is a sub-collection of users.
     #
@@ -347,7 +357,7 @@ module Mongo
       message = BSON::ByteBuffer.new("\0\0\0\0")
       BSON::BSON_RUBY.serialize_cstr(message, "#{@db.name}.#{@name}")
       message.put_int(0)
-      message.put_binary(BSON::BSON_CODER.serialize(selector, false, true).to_s)
+      message.put_binary(BSON::BSON_CODER.serialize(selector, false, true, @connection.max_bson_size).to_s)
 
       @connection.instrument(:remove, :database => @db.name, :collection => @name, :selector => selector) do
         if safe
@@ -394,7 +404,7 @@ module Mongo
       update_options += 2 if opts[:multi]
       message.put_int(update_options)
       message.put_binary(BSON::BSON_CODER.serialize(selector, false, true).to_s)
-      message.put_binary(BSON::BSON_CODER.serialize(document, false, true).to_s)
+      message.put_binary(BSON::BSON_CODER.serialize(document, false, true, @connection.max_bson_size).to_s)
 
       @connection.instrument(:update, :database => @db.name, :collection => @name, :selector => selector, :document => document) do
         if safe
@@ -887,7 +897,7 @@ module Mongo
       message = BSON::ByteBuffer.new("\0\0\0\0")
       BSON::BSON_RUBY.serialize_cstr(message, "#{@db.name}.#{collection_name}")
       documents.each do |doc|
-        message.put_binary(BSON::BSON_CODER.serialize(doc, check_keys, true).to_s)
+        message.put_binary(BSON::BSON_CODER.serialize(doc, check_keys, true, @connection.max_bson_size).to_s)
       end
       raise InvalidOperation, "Exceded maximum insert size of 16,000,000 bytes" if message.size > 16_000_000
 

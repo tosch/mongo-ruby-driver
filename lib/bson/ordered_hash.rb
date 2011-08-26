@@ -119,9 +119,9 @@ module BSON
       end
 
       def inspect
-        str = '{'
+        str = "#<BSON::OrderedHash:0x#{self.object_id.to_s(16)} {"
         str << (@ordered_keys || []).collect { |k| "\"#{k}\"=>#{self.[](k).inspect}" }.join(", ")
-        str << '}'
+        str << '}>'
       end
 
       def delete(key, &block)
@@ -159,20 +159,22 @@ module BSON
         @ordered_keys = []
       end
 
-      def hash
-        code = 17
-        each_pair do |key, value|
-          code = 37 * code + key.hash
-          code = 37 * code + value.hash
+      if RUBY_VERSION =~ /1.8.6/
+        def hash
+          code = 17
+          each_pair do |key, value|
+            code = 37 * code + key.hash
+            code = 37 * code + value.hash
+          end
+          code & 0x7fffffff
         end
-        code & 0x7fffffff
-      end
 
-      def eql?(o)
-        if o.instance_of? BSON::OrderedHash
-          self.hash == o.hash
-        else
-          false
+        def eql?(o)
+          if o.instance_of? BSON::OrderedHash
+            self.hash == o.hash
+          else
+            false
+          end
         end
       end
 

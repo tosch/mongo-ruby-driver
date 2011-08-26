@@ -20,10 +20,12 @@ module Mongo
   class Cursor
     include Mongo::Conversions
     include Enumerable
+    include Mongo::Constants
 
     attr_reader :collection, :selector, :fields,
       :order, :hint, :snapshot, :timeout,
-      :full_collection_name, :transformer
+      :full_collection_name, :transformer,
+      :options
 
     # Create a new cursor.
     #
@@ -59,6 +61,7 @@ module Mongo
       @limit      = opts[:limit]    || 0
       @tailable   = opts[:tailable] || false
       @timeout    = opts.fetch(:timeout, true)
+      @options    = 0
 
       # Use this socket for the query
       @socket     = opts[:socket]
@@ -73,11 +76,33 @@ module Mongo
       @cache        = []
       @returned     = 0
 
+      if(!@timeout)
+        add_option(OP_QUERY_NO_CURSOR_TIMEOUT)
+      end
+      if(@connection.slave_ok?)
+        add_option(OP_QUERY_SLAVE_OK)
+      end
+      if(@tailable)
+        add_option(OP_QUERY_TAILABLE)
+      end
+
       if @collection.name =~ /^\$cmd/ || @collection.name =~ /^system/
         @command = true
       else
         @command = false
       end
+    end
+
+    # Guess whether the cursor is alive on the server.
+    #
+    # Note that this method only checks whether we have
+    # a cursor id. The cursor may still have timed out
+    # on the server. This will be indicated in the next
+    # call to Cursor#next_document.
+    #
+    # @return [Boolean]
+    def alive?
+      @cursor_id && @cursor_id != 0
     end
 
     # Get the next document specified the cursor options.
@@ -274,7 +299,8 @@ module Mongo
     #
     # @core explain explain-instance_method
     def explain
-      c = Cursor.new(@collection, query_options_hash.merge(:limit => -@limit.abs, :explain => true))
+      c = Cursor.new(@collection,
+        query_options_hash.merge(:limit => -@limit.abs, :explain => true))
       explanation = c.next_document
       c.close
 
@@ -315,11 +341,43 @@ module Mongo
     # @see http://www.mongodb.org/display/DOCS/Mongo+Wire+Protocol#MongoWireProtocol-Mongo::Constants::OPQUERY
     # The MongoDB wire protocol.
     def query_opts
-      opts     = 0
-      opts    |= Mongo::Constants::OP_QUERY_NO_CURSOR_TIMEOUT unless @timeout
-      opts    |= Mongo::Constants::OP_QUERY_SLAVE_OK if @connection.slave_ok?
-      opts    |= Mongo::Constants::OP_QUERY_TAILABLE if @tailable
-      opts
+      warn "The method Cursor#query_opts has been deprecated " +
+        "and will removed in v2.0. Use Cursor#options instead."
+      @options
+    end
+
+    # Add an option to the query options bitfield.
+    #
+    # @param opt a valid query option
+    #
+    # @raise InvalidOperation if this method is run after the cursor has bee
+    #   iterated for the first time.
+    #
+    # @return [Integer] the current value of the options bitfield for this cursor.
+    #
+    # @see http://www.mongodb.org/display/DOCS/Mongo+Wire+Protocol#MongoWireProtocol-Mongo::Constants::OPQUERY
+    def add_option(opt)
+      check_modifiable
+
+      @options |= opt
+      @options
+    end
+
+    # Remove an option from the query options bitfield.
+    #
+    # @param opt a valid query option
+    #
+    # @raise InvalidOperation if this method is run after the cursor has bee
+    #   iterated for the first time.
+    #
+    # @return [Integer] the current value of the options bitfield for this cursor.
+    #
+    # @see http://www.mongodb.org/display/DOCS/Mongo+Wire+Protocol#MongoWireProtocol-Mongo::Constants::OPQUERY
+    def remove_option(opt)
+      check_modifiable
+
+      @options &= ~opt
+      @options
     end
 
     # Get the query options for this Cursor.
@@ -418,7 +476,7 @@ module Mongo
 
     def construct_query_message
       message = BSON::ByteBuffer.new
-      message.put_int(query_opts)
+      message.put_int(@options)
       BSON::BSON_RUBY.serialize_cstr(message, "#{@db.name}.#{@collection.name}")
       message.put_int(@skip)
       message.put_int(@limit)
@@ -431,8 +489,8 @@ module Mongo
     def instrument_payload
       log = { :database => @db.name, :collection => @collection.name, :selector => selector }
       log[:fields] = @fields  if @fields
-      log[:skip] = @skip  if @skip && (@skip > 0)
-      log[:limit] = @limit  if @limit && (@limit > 0)
+      log[:skip] = @skip  if @skip && (@skip != 0)
+      log[:limit] = @limit  if @limit && (@limit != 0)
       log[:order] = @order  if @order
       log
     end

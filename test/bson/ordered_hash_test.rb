@@ -1,4 +1,4 @@
-require './test/test_helper'
+require './test/bson/test_helper'
 
 class OrderedHashTest < Test::Unit::TestCase
 
@@ -38,11 +38,29 @@ class OrderedHashTest < Test::Unit::TestCase
     same_doc = BSON::OrderedHash.new
     same_doc['_id']  = 'ab12'
     same_doc['name'] = 'test'
+
     list << doc
     list << same_doc
 
     assert_equal 2, list.size
     assert_equal 1, list.uniq.size
+  end
+
+  if !(RUBY_VERSION =~ /1.8.6/)
+    def test_compatibility_with_hash
+      list = []
+      doc  = BSON::OrderedHash.new
+      doc['_id']  = 'ab12'
+      doc['name'] = 'test'
+
+      doc2 = {}
+      doc2['_id']  = 'ab12'
+      doc2['name'] = 'test'
+      list << doc
+      list << doc2
+
+      assert_equal 1, list.uniq.size
+    end
   end
 
   def test_equality
@@ -173,8 +191,10 @@ class OrderedHashTest < Test::Unit::TestCase
     assert_equal [1, 2, 3, 'foo'], noob.values
   end
 
-  def test_inspect_retains_order
-    assert_equal '{"c"=>1, "a"=>2, "z"=>3}', @oh.inspect
+  if RUBY_VERSION < "1.9.2"
+    def test_inspect_retains_order
+      assert_equal "#<BSON::OrderedHash:0x#{@oh.object_id.to_s(16)} {\"c\"=>1, \"a\"=>2, \"z\"=>3}>", @oh.inspect
+    end
   end
 
   def test_clear

@@ -7,7 +7,7 @@ class ReplicaSetQueryTest < Test::Unit::TestCase
   include Mongo
 
   def setup
-    @conn = ReplSetConnection.new([RS.host, RS.ports[0]])
+    @conn = ReplSetConnection.new([RS.host, RS.ports[0], RS.ports[1]])
     @db = @conn.db(MONGO_TEST_DB)
     @db.drop_collection("test-sets")
     @coll = @db.collection("test-sets")
@@ -15,6 +15,7 @@ class ReplicaSetQueryTest < Test::Unit::TestCase
 
   def teardown
     RS.restart_killed_nodes
+    @conn.close if @conn
   end
 
   def test_query

@@ -36,7 +36,8 @@ module Mongo
     STANDARD_HEADER_SIZE = 16
     RESPONSE_HEADER_SIZE = 20
 
-    attr_reader :logger, :size, :auths, :primary, :safe, :primary_pool, :host_to_try, :pool_size, :unix_socket_path
+    attr_reader :logger, :size, :auths, :primary, :safe, :host_to_try,
+      :pool_size, :connect_timeout, :primary_pool
 
     # Counter for generating unique request ids.
     @@current_request_id = 0
@@ -53,8 +54,9 @@ module Mongo
     # Connection#arbiters. This is useful if your application needs to connect manually to nodes other
     # than the primary.
     #
-    # @param [String, Hash] host.
-    # @param [Integer] port specify a port number here if only one host is being specified.
+    # @param [String, Hash] host or path to unix domain socket.
+    # @param [Integer, Symbol] port specify a port number here if only one host is being specified. Use
+    #   :socket if the host is actually a path to a unix domain socket.
     #
     # @option opts [Boolean, Hash] :safe (false) Set the default safe-mode options
     #   propogated to DB objects instantiated off of this Connection. This
@@ -86,6 +88,9 @@ module Mongo
     # @example localhost, 3000, where this node may be a slave
     #   Connection.new("localhost", 3000, :slave_ok => true)
     #
+    # @example Unix Domain Socket
+    #   Connection.new "/var/run/mongodb.sock", :socket
+    #
     # @see http://api.mongodb.org/ruby/current/file.REPLICA_SETS.html Replica sets in Ruby
     #
     # @raise [ReplicaSetConnectionError] This is raised if a replica set name is specified and the
@@ -100,8 +105,6 @@ module Mongo
 
       # slave_ok can be true only if one node is specified
       @slave_ok = opts[:slave_ok]
-
-      opts[:socket] = host[:socket] if host.kind_of?(Hash) && !opts[:socket]
 
       setup(opts)
     end
@@ -350,7 +353,7 @@ module Mongo
       self["admin"].command(oh)
     end
 
-    # Checks if a server is alive. This command will return immediately 
+    # Checks if a server is alive. This command will return immediately
     # even if the server is in a lock.
     #
     # @return [Hash]
@@ -514,12 +517,11 @@ module Mongo
           @read_primary = false
         end
 
+        @max_bson_size = config['maxBsonObjectSize'] || Mongo::DEFAULT_MAX_BSON_SIZE
         set_primary(@host_to_try)
       end
 
-      if connected?
-        BSON::BSON_CODER.update_max_bson_size(self)
-      else
+      if !connected?
         raise ConnectionFailure, "Failed to connect to a master node at #{self.to_s}"
       end
     end
@@ -573,8 +575,7 @@ module Mongo
     #
     # @return [Integer]
     def max_bson_size
-      config = self['admin'].command({:ismaster => 1})
-      config['maxBsonObjectSize'] || Mongo::DEFAULT_MAX_BSON_SIZE
+      @max_bson_size
     end
 
     # Checkout a socket for reading (i.e., a secondary node).
@@ -607,6 +608,23 @@ module Mongo
       end
     end
 
+    # Log a message with the given level.
+    def log(level, message)
+      return unless @logger
+      case level
+        when :debug then
+          @logger.debug "MONGODB [DEBUG] #{msg}"
+        when :warn then
+          @logger.warn "MONGODB [WARNING] #{msg}"
+        when :error then
+          @logger.error "MONGODB [ERROR] #{msg}"
+        when :fatal then
+          @logger.fatal "MONGODB [FATAL] #{msg}"
+        else
+          @logger.info "MONGODB [INFO] #{msg}"
+      end
+    end
+
     # Execute the block and log the operation described by name
     # and payload.
     # TODO: Not sure if this should take a block.
@@ -628,6 +646,9 @@ module Mongo
 
     # Generic initialization code.
     def setup(opts)
+      # Default maximum BSON object size
+      @max_bson_size = Mongo::DEFAULT_MAX_BSON_SIZE
+
       # Authentication objects
       @auths = opts.fetch(:auths, [])
 
@@ -672,9 +693,6 @@ module Mongo
         "and should be disabled for high-performance production apps.")
       end
 
-      @unix_socket_path = opts[:socket]
-      @host_to_try = [@unix_socket_path] if @unix_socket_path
-
       should_connect = opts.fetch(:connect, true)
       connect if should_connect
     end
@@ -689,7 +707,11 @@ module Mongo
     def format_pair(host, port)
       case host
         when String
-          [host, port ? port.to_i : DEFAULT_PORT]
+          if port == :socket || port == 'socket'
+            [host, :socket]
+          else
+            [host, port ? port.to_i : DEFAULT_PORT]
+          end
         when nil
           ['localhost', DEFAULT_PORT]
       end
@@ -720,12 +742,12 @@ module Mongo
 
     def check_is_master(node)
       begin
-        if node[1]
-          host, port = *node
+        host, port = *node
 
-          socket = get_tcp_socket(host, port)
+        socket = if port == :socket
+          get_unix_socket(host)
         else
-          socket = get_unix_socket(node[0])
+          get_tcp_socket(host, port)
         end
 
         config = self['admin'].command({:ismaster => 1}, :socket => socket)
@@ -739,6 +761,8 @@ module Mongo
     end
 
     def get_tcp_socket(host, port)
+      socket = nil
+
       if @connect_timeout
         Mongo::TimeoutHandler.timeout(@connect_timeout, OperationTimeout) do
           socket = TCPSocket.new(host, port)
@@ -753,26 +777,24 @@ module Mongo
     end
 
     def get_unix_socket(path)
+      socket = nil
+
       if @connect_timeout
         Mongo::TimeoutHandler.timeout(@connect_timeout, OperationTimeout) do
-          UNIXSocket.new(path)
+          socket = UNIXSocket.new(path)
         end
       else
-        UNIXSocket.new(path)
+        socket = UNIXSocket.new(path)
       end
+
+      socket
     end
 
     # Set the specified node as primary.
     def set_primary(node)
-      if node[1]
-        host, port = *node
-        @primary = [host, port]
-        @primary_pool = Pool.new(self, host, port, :size => @pool_size, :timeout => @timeout)
-      else
-        socket_path = node[0]
-        @primary = [socket_path]
-        @primary_pool = Pool.new(self, socket_path, nil, :size => @pool_size, :timeout => @timeout)
-      end
+      host, port = *node
+      @primary = [host, port]
+      @primary_pool = Pool.new(self, host, port, :size => @pool_size, :timeout => @timeout)
     end
 
     ## Low-level connection methods.

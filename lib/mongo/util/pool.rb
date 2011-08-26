@@ -17,8 +17,9 @@
 
 module Mongo
   class Pool
+    PING_ATTEMPTS = 6
 
-    attr_accessor :host, :port, :size, :timeout, :safe, :checked_out, :unix_socket_path
+    attr_accessor :host, :port, :size, :timeout, :safe, :checked_out, :connection
 
     # Create a new pool of connections.
     #
@@ -26,12 +27,9 @@ module Mongo
       @connection  = connection
 
       @host, @port = host, port
-      @unix_socket_path = nil
 
-      unless @port
-        @unix_socket_path = host
-        @host = nil
-      end
+      # A Mongo::Node object.
+      @node = opts[:node]
 
       # Pool size and timeout.
       @size      = opts[:size] || 1
@@ -56,13 +54,49 @@ module Mongo
         begin
           sock.close
         rescue IOError => ex
-          warn "IOError when attempting to close socket connected to #{self.to_s}: #{ex.inspect}"
+          warn "IOError when attempting to close socket connected to #{host_string}: #{ex.inspect}"
         end
       end
-      @host = @port = @unix_socket_path = nil
+      @host = @port = nil
       @sockets.clear
       @pids.clear
       @checked_out.clear
+    end
+
+    def host_string
+      if @port == :socket
+        "#{@host}"
+      else
+        "#{@host}:#{@port}"
+      end
+    end
+
+    def host_port
+      [@host, @port]
+    end
+
+    # Return the time it takes on average
+    # to do a round-trip against this node.
+    def ping_time
+      trials = []
+      begin
+         PING_ATTEMPTS.times do
+           t1 = Time.now
+           self.connection['admin'].command({:ping => 1}, :socket => @node.socket)
+           trials << (Time.now - t1) * 1000
+         end
+       rescue OperationFailure, SocketError, SystemCallError, IOError => ex
+         return nil
+      end
+
+      trials.sort!
+      trials.delete_at(trials.length-1)
+      trials.delete_at(0)
+
+      total = 0.0
+      trials.each { |t| total += t }
+
+      (total / trials.length).floor
     end
 
     # Return a socket to the pool.
@@ -80,14 +114,15 @@ module Mongo
     # therefore, it runs within a mutex.
     def checkout_new_socket
       begin
-        if @unix_socket_path
+        if @port == :socket
           socket = UNIXSocket.new(@unix_socket_path)
         else
           socket = TCPSocket.new(@host, @port)
           socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
         end
       rescue => ex
-        raise ConnectionFailure, "Failed to connect to #{self.to_s}: #{ex}"
+        socket.close if socket
+        raise ConnectionFailure, "Failed to connect to #{host_string}: #{ex}"
       end
 
       # If any saved authentications exist, we want to apply those
@@ -181,14 +216,6 @@ module Mongo
             @queue.wait(@connection_mutex)
           end
         end
-      end
-    end
-
-    def to_s
-      if @unix_socket_path
-        "#{@unix_socket_path}"
-      else
-        "#{@host}:#{@port}"
       end
     end
   end
