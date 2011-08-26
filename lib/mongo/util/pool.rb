@@ -115,7 +115,7 @@ module Mongo
     def checkout_new_socket
       begin
         if @port == :socket
-          socket = UNIXSocket.new(@unix_socket_path)
+          socket = UNIXSocket.new(@host)
         else
           socket = TCPSocket.new(@host, @port)
           socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
