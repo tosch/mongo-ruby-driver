@@ -1,4 +1,4 @@
-require './lib/bson/version'
+require './lib/bson'
 VERSION_HEADER = File.open(File.join(File.dirname(__FILE__), 'ext', 'cbson', 'version.h'), "r")
 VERSION        = VERSION_HEADER.read.scan(/VERSION "(\d[^"]+)"/)[0][0]
 Gem::Specification.new do |s|
