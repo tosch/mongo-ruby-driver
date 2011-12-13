@@ -2,22 +2,51 @@ $:.unshift(File.join(File.dirname(__FILE__), '..', 'lib'))
 require './test/replica_sets/rs_test_helper'
 require 'benchmark'
 
-# NOTE: This test expects a replica set of three nodes to be running on RS.host,
-# on ports TEST_PORT, RS.ports[1], and TEST + 2.
 class ReplicaSetRefreshTest < Test::Unit::TestCase
-  include Mongo
+  include ReplicaSetTest
+
+  def setup
+    @conn = nil
+  end
 
   def teardown
-    RS.restart_killed_nodes
+    self.rs.restart_killed_nodes
     @conn.close if @conn
   end
 
+  def test_connect_speed
+    Benchmark.bm do |x|
+      x.report("Connect") do
+        10.times do
+          ReplSetConnection.new([self.rs.host, self.rs.ports[0]],
+                                [self.rs.host, self.rs.ports[1]],
+                                [self.rs.host, self.rs.ports[2]],
+                                :refresh_mode => false)
+        end
+      end
+
+          @con = ReplSetConnection.new([self.rs.host, self.rs.ports[0]],
+                                       [self.rs.host, self.rs.ports[1]],
+                                       [self.rs.host, self.rs.ports[2]],
+                                       :refresh_mode => false)
+
+      x.report("manager") do
+        man = Mongo::PoolManager.new(@con, @con.seeds)
+        10.times do
+          man.connect
+        end
+      end
+    end
+  end
+
   def test_connect_and_manual_refresh_with_secondaries_down
-    RS.kill_all_secondaries
+    self.rs.kill_all_secondaries
 
     rescue_connection_failure do
-      @conn = ReplSetConnection.new([RS.host, RS.ports[0]], [RS.host, RS.ports[1]],
-        [RS.host, RS.ports[2]], :auto_refresh => false)
+      @conn = ReplSetConnection.new([self.rs.host, self.rs.ports[0]],
+                                    [self.rs.host, self.rs.ports[1]],
+                                    [self.rs.host, self.rs.ports[2]],
+                                    :refresh_mode => false)
     end
 
     assert_equal [], @conn.secondaries
@@ -30,7 +59,7 @@ class ReplicaSetRefreshTest < Test::Unit::TestCase
     assert @conn.connected?
     assert_equal @conn.read_pool, @conn.primary_pool
 
-    RS.restart_killed_nodes
+    self.rs.restart_killed_nodes
     assert_equal [], @conn.secondaries
     assert @conn.connected?
     assert_equal @conn.read_pool, @conn.primary_pool
@@ -42,39 +71,83 @@ class ReplicaSetRefreshTest < Test::Unit::TestCase
   end
 
   def test_automated_refresh_with_secondaries_down
-    RS.kill_all_secondaries
+    self.rs.kill_all_secondaries
 
     rescue_connection_failure do
-      @conn = ReplSetConnection.new([RS.host, RS.ports[0]], [RS.host, RS.ports[1]],
-        [RS.host, RS.ports[2]], :refresh_interval => 2, :auto_refresh => true)
+      @conn = ReplSetConnection.new([self.rs.host, self.rs.ports[0]],
+                                    [self.rs.host, self.rs.ports[1]],
+                                    [self.rs.host, self.rs.ports[2]],
+                                    :refresh_interval => 2,
+                                    :refresh_mode => :sync)
     end
 
     assert_equal [], @conn.secondaries
     assert @conn.connected?
     assert_equal @conn.read_pool, @conn.primary_pool
+    old_refresh_version = @conn.refresh_version
 
-    RS.restart_killed_nodes
+    self.rs.restart_killed_nodes
+    sleep(4)
+    @conn['foo']['bar'].find_one
+    @conn['foo']['bar'].insert({:a => 1})
 
-    sleep(3)
-
-    assert @conn.read_pool != @conn.primary_pool, "Read pool and primary pool are identical."
-    assert @conn.secondaries.length > 0, "No secondaries have been added."
+    assert @conn.refresh_version > old_refresh_version,
+      "Refresh version hasn't changed."
+    assert @conn.secondaries.length > 0,
+      "No secondaries have been added."
+    assert @conn.read_pool != @conn.primary_pool,
+      "Read pool and primary pool are identical."
   end
 
   def test_automated_refresh_with_removed_node
-    @conn = ReplSetConnection.new([RS.host, RS.ports[0]], [RS.host, RS.ports[1]],
-      [RS.host, RS.ports[2]], :refresh_interval => 2, :auto_refresh => true)
+    @conn = ReplSetConnection.new([self.rs.host, self.rs.ports[0]],
+                                  [self.rs.host, self.rs.ports[1]],
+                                  [self.rs.host, self.rs.ports[2]],
+                                  :refresh_interval => 2,
+                                  :refresh_mode => :sync)
 
-    assert @conn.secondaries.length == 2
-    p @conn.secondaries
-    p @conn.secondary_pools.length
+    num_secondaries = @conn.secondary_pools.length
+    old_refresh_version = @conn.refresh_version
 
-    RS.remove_secondary_node
-    sleep(6)
+    n = self.rs.remove_secondary_node
+    sleep(4)
+    @conn['foo']['bar'].find_one
 
-    p @conn.secondaries
-    p @conn.secondary_pools.length
-    assert @conn.secondaries.length == 1
+    assert @conn.refresh_version > old_refresh_version,
+      "Refresh version hasn't changed."
+    assert_equal num_secondaries - 1, @conn.secondaries.length
+    assert_equal num_secondaries - 1, @conn.secondary_pools.length
+
+    self.rs.add_node(n)
   end
 
+  def test_adding_and_removing_nodes
+    @conn = ReplSetConnection.new([self.rs.host, self.rs.ports[0]],
+                                  [self.rs.host, self.rs.ports[1]],
+                                  [self.rs.host, self.rs.ports[2]],
+                                  :refresh_interval => 2, :refresh_mode => :sync)
+
+    self.rs.add_node
+    sleep(4)
+    @conn['foo']['bar'].find_one
+
+    @conn2 = ReplSetConnection.new([self.rs.host, self.rs.ports[0]],
+                                   [self.rs.host, self.rs.ports[1]],
+                                   [self.rs.host, self.rs.ports[2]],
+                                   :refresh_interval => 2, :refresh_mode => :sync)
+
+    assert @conn2.secondaries.sort == @conn.secondaries.sort,
+      "Second connection secondaries not equal to first."
+    assert_equal 3, @conn.secondary_pools.length
+    assert_equal 3, @conn.secondaries.length
+
+    config = @conn['admin'].command({:ismaster => 1})
+
+    self.rs.remove_secondary_node
+    sleep(4)
+    config = @conn['admin'].command({:ismaster => 1})
+
+    assert_equal 2, @conn.secondary_pools.length
+    assert_equal 2, @conn.secondaries.length
+  end
 end

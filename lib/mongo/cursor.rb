@@ -18,14 +18,15 @@ module Mongo
 
   # A cursor over query results. Returned objects are hashes.
   class Cursor
-    include Mongo::Conversions
     include Enumerable
     include Mongo::Constants
+    include Mongo::Conversions
+    include Mongo::Logging
 
     attr_reader :collection, :selector, :fields,
       :order, :hint, :snapshot, :timeout,
       :full_collection_name, :transformer,
-      :options
+      :options, :cursor_id, :show_disk_loc
 
     # Create a new cursor.
     #
@@ -70,6 +71,12 @@ module Mongo
       @query_run    = false
 
       @transformer = opts[:transformer]
+      if value = opts[:read]
+        Mongo::Support.validate_read_preference(value)
+      else
+        value = collection.read_preference
+      end
+      @read_preference = value.is_a?(Hash) ? value.dup : value
       batch_size(opts[:batch_size] || 0)
 
       @full_collection_name = "#{@collection.db.name}.#{@collection.name}"
@@ -79,7 +86,7 @@ module Mongo
       if(!@timeout)
         add_option(OP_QUERY_NO_CURSOR_TIMEOUT)
       end
-      if(@connection.slave_ok?)
+      if(@read_preference != :primary)
         add_option(OP_QUERY_SLAVE_OK)
       end
       if(@tailable)
@@ -91,6 +98,10 @@ module Mongo
       else
         @command = false
       end
+
+      @checkin_read_pool = false
+      @checkin_connection = false
+      @read_pool = nil
     end
 
     # Guess whether the cursor is alive on the server.
@@ -98,7 +109,7 @@ module Mongo
     # Note that this method only checks whether we have
     # a cursor id. The cursor may still have timed out
     # on the server. This will be indicated in the next
-    # call to Cursor#next_document.
+    # call to Cursor#next.
     #
     # @return [Boolean]
     def alive?
@@ -108,8 +119,15 @@ module Mongo
     # Get the next document specified the cursor options.
     #
     # @return [Hash, Nil] the next document or Nil if no documents remain.
-    def next_document
-      refresh if @cache.length == 0
+    def next
+      if @cache.length == 0
+        if @query_run && (@options & OP_QUERY_EXHAUST != 0)
+          close
+          return nil
+        else
+          refresh
+        end
+      end
       doc = @cache.shift
 
       if doc && doc['$err']
@@ -118,12 +136,12 @@ module Mongo
         # If the server has stopped being the master (e.g., it's one of a
         # pair but it has died or something like that) then we close that
         # connection. The next request will re-open on master server.
-        if err == "not master"
+        if err.include?("not master")
           @connection.close
-          raise ConnectionFailure, err
+          raise ConnectionFailure.new(err, doc['code'], doc)
         end
 
-        raise OperationFailure, err
+        raise OperationFailure.new(err, doc['code'], doc)
       end
 
       if @transformer.nil?
@@ -132,7 +150,7 @@ module Mongo
         @transformer.call(doc) if doc
       end
     end
-    alias :next :next_document
+    alias :next_document :next
 
     # Reset this cursor on the server. Cursor options, such as the
     # query string and the values for skip and limit, are preserved.
@@ -173,7 +191,7 @@ module Mongo
       response = @db.command(command)
       return response['n'].to_i if Mongo::Support.ok?(response)
       return 0 if response['errmsg'] == "ns missing"
-      raise OperationFailure, "Count failed: #{response['errmsg']}"
+      raise OperationFailure.new("Count failed: #{response['errmsg']}", response['code'], response)
     end
 
     # Sort this cursor's results.
@@ -269,11 +287,8 @@ module Mongo
     #     puts doc['user']
     #   end
     def each
-      #num_returned = 0
-      #while has_next? && (@limit <= 0 || num_returned < @limit)
-      while doc = next_document
-        yield doc #next_document
-        #num_returned += 1
+      while doc = self.next
+        yield doc
       end
     end
 
@@ -322,7 +337,7 @@ module Mongo
         message = BSON::ByteBuffer.new([0, 0, 0, 0])
         message.put_int(1)
         message.put_long(@cursor_id)
-        @logger.debug("MONGODB cursor.close #{@cursor_id}") if @logger
+        log(:debug, "Cursor#close #{@cursor_id}")
         @connection.send_message(Mongo::Constants::OP_KILL_CURSORS, message, :connection => :reader)
       end
       @cursor_id = 0
@@ -332,7 +347,9 @@ module Mongo
     # Is this cursor closed?
     #
     # @return [Boolean]
-    def closed?; @closed; end
+    def closed?
+      @closed
+    end
 
     # Returns an integer indicating which query options have been selected.
     #
@@ -400,7 +417,7 @@ module Mongo
     # Clean output for inspect.
     def inspect
       "<Mongo::Cursor:0x#{object_id.to_s(16)} namespace='#{@db.name}.#{@collection.name}' " +
-        "@selector=#{@selector.inspect}>"
+        "@selector=#{@selector.inspect} @cursor_id=#{@cursor_id}>"
     end
 
     private
@@ -422,12 +439,50 @@ module Mongo
 
     # Return the number of documents remaining for this cursor.
     def num_remaining
-      refresh if @cache.length == 0
+      if @cache.length == 0
+        if @query_run && (@options & OP_QUERY_EXHAUST != 0)
+          close
+          return 0
+        else
+          refresh
+        end
+      end
+
       @cache.length
     end
 
+    # Refresh the documents in @cache. This means either
+    # sending the initial query or sending a GET_MORE operation.
     def refresh
-      return if send_initial_query || @cursor_id.zero?
+      if !@query_run
+        send_initial_query
+      elsif !@cursor_id.zero?
+        send_get_more
+      end
+    end
+
+    def send_initial_query
+      message = construct_query_message
+      payload = instrument_payload if @logger
+      sock    = @socket || checkout_socket_from_connection
+      instrument(:find, payload) do
+        begin
+        results, @n_received, @cursor_id = @connection.receive_message(
+          Mongo::Constants::OP_QUERY, message, nil, sock, @command,
+          nil, @options & OP_QUERY_EXHAUST != 0)
+        rescue ConnectionFailure, OperationFailure, OperationTimeout => ex
+          force_checkin_socket(sock)
+          raise ex
+        end
+        checkin_socket(sock) unless @socket
+        @returned += @n_received
+        @cache += results
+        @query_run = true
+        close_cursor_if_query_complete
+      end
+    end
+
+    def send_get_more
       message = BSON::ByteBuffer.new([0, 0, 0, 0])
 
       # DB name.
@@ -446,31 +501,95 @@ module Mongo
 
       # Cursor id.
       message.put_long(@cursor_id)
-      @logger.debug("MONGODB cursor.refresh() for cursor #{@cursor_id}") if @logger
+      log(:debug, "cursor.refresh() for cursor #{@cursor_id}") if @logger
+      sock = @socket || checkout_socket_for_op_get_more
+
+      begin
       results, @n_received, @cursor_id = @connection.receive_message(
-          Mongo::Constants::OP_GET_MORE, message, nil, @socket, @command)
+        Mongo::Constants::OP_GET_MORE, message, nil, sock, @command, nil)
+      rescue ConnectionFailure, OperationFailure, OperationTimeout => ex
+        force_checkin_socket(sock)
+        raise ex
+      end
+      checkin_socket(sock) unless @socket
       @returned += @n_received
       @cache += results
       close_cursor_if_query_complete
     end
 
-    # Run query the first time we request an object from the wire
-    # TODO: should we be calling instrument_payload even if logging
-    # is disabled?
-    def send_initial_query
-      if @query_run
-        false
-      else
-        message = construct_query_message
-        @connection.instrument(:find, instrument_payload) do
-          results, @n_received, @cursor_id = @connection.receive_message(
-            Mongo::Constants::OP_QUERY, message, nil, @socket, @command)
-          @returned += @n_received
-          @cache += results
-          @query_run = true
-          close_cursor_if_query_complete
+    def checkout_socket_from_connection
+      socket = nil
+      begin
+        @checkin_connection = true
+        if @command || @read_preference == :primary
+          socket = @connection.checkout_writer
+        else
+          @read_pool = @connection.read_pool
+          socket = @connection.checkout_reader
         end
-        true
+      rescue SystemStackError, NoMemoryError, SystemCallError => ex
+        @connection.close
+        raise ex
+      end
+
+      socket
+    end
+
+    def checkout_socket_for_op_get_more
+      if @read_pool && (@read_pool != @connection.read_pool)
+        checkout_socket_from_read_pool
+      else
+        checkout_socket_from_connection
+      end
+    end
+
+    def checkout_socket_from_read_pool
+      new_pool = @connection.secondary_pools.detect do |pool|
+        pool.host == @read_pool.host && pool.port == @read_pool.port
+      end
+      if new_pool
+        sock = nil
+        begin
+          @read_pool = new_pool
+          sock = new_pool.checkout
+          @checkin_read_pool = true
+        rescue SystemStackError, NoMemoryError, SystemCallError => ex
+          @connection.close
+          raise ex
+        end
+        return sock
+      else
+        raise Mongo::OperationFailure, "Failure to continue iterating " +
+          "cursor because the the replica set member persisting this " +
+          "cursor at #{@read_pool.host_string} cannot be found."
+      end
+    end
+
+    def checkin_socket(sock)
+      if @checkin_read_pool
+        @read_pool.checkin(sock)
+        @checkin_read_pool = false
+      elsif @checkin_connection
+        if @command || @read_preference == :primary
+          @connection.checkin_writer(sock)
+        else
+          @connection.checkin_reader(sock)
+        end
+        @checkin_connection = false
+      end
+    end
+
+    def force_checkin_socket(sock)
+      if @checkin_read_pool
+        @read_pool.checkin(sock)
+        @checkin_read_pool = false
+      else
+        if @command || @read_preference == :primary
+          @connection.checkin_writer(sock)
+        else
+          @connection.checkin_reader(sock)
+        end
+        @checkin_connection = false
       end
     end
 
@@ -488,10 +607,10 @@ module Mongo
 
     def instrument_payload
       log = { :database => @db.name, :collection => @collection.name, :selector => selector }
-      log[:fields] = @fields  if @fields
-      log[:skip] = @skip  if @skip && (@skip != 0)
-      log[:limit] = @limit  if @limit && (@limit != 0)
-      log[:order] = @order  if @order
+      log[:fields] = @fields if @fields
+      log[:skip]   = @skip   if @skip && (@skip != 0)
+      log[:limit]  = @limit  if @limit && (@limit != 0)
+      log[:order]  = @order  if @order
       log
     end
 
@@ -503,7 +622,7 @@ module Mongo
       spec['$hint']     = @hint if @hint && @hint.length > 0
       spec['$explain']  = true if @explain
       spec['$snapshot'] = true if @snapshot
-      spec['$maxscan']  = @max_scan if @max_scan
+      spec['$maxScan']  = @max_scan if @max_scan
       spec['$returnKey']   = true if @return_key
       spec['$showDiskLoc'] = true if @show_disk_loc
       spec
@@ -511,11 +630,8 @@ module Mongo
 
     # Returns true if the query contains order, explain, hint, or snapshot.
     def query_contains_special_fields?
-      @order || @explain || @hint || @snapshot
-    end
-
-    def to_s
-      "DBResponse(flags=#@result_flags, cursor_id=#@cursor_id, start=#@starting_from)"
+      @order || @explain || @hint || @snapshot || @show_disk_loc ||
+        @max_scan || @return_key
     end
 
     def close_cursor_if_query_complete

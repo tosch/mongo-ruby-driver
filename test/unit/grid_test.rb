@@ -6,6 +6,7 @@ class GridTest < Test::Unit::TestCase
     setup do
       @conn   = stub()
       @conn.stubs(:safe)
+      @conn.stubs(:read_preference)
       @db     = DB.new("testing", @conn)
       @files  = mock()
       @chunks = mock()
@@ -13,11 +14,13 @@ class GridTest < Test::Unit::TestCase
       @db.expects(:[]).with('fs.files').returns(@files)
       @db.expects(:[]).with('fs.chunks').returns(@chunks)
       @db.stubs(:safe)
+      @db.stubs(:read_preference)
     end
 
     context "Grid classe with standard connections" do
       setup do
-        @conn.expects(:slave_ok?).returns(false)
+        @conn.expects(:class).returns(Connection)
+        @conn.expects(:read_primary?).returns(true)
       end
 
       should "create indexes for Grid" do
@@ -34,7 +37,8 @@ class GridTest < Test::Unit::TestCase
 
     context "Grid classes with slave connection" do
       setup do
-        @conn.expects(:slave_ok?).returns(true)
+        @conn.expects(:class).twice.returns(Connection)
+        @conn.expects(:read_primary?).returns(false)
       end
 
       should "not create indexes for Grid" do

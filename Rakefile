@@ -1,11 +1,16 @@
 # -*- mode: ruby; -*-
-require 'rubygems'
-require 'rubygems/specification'
+if RUBY_VERSION < '1.9.0'
+  require 'rubygems'
+  require 'rubygems/specification'
+end
 require 'fileutils'
-require 'rake'
 require 'rake/testtask'
-require 'rake/gempackagetask'
 require 'rbconfig'
+require 'rake'
+begin
+  require 'ci/reporter/rake/test_unit'
+  rescue LoadError
+end
 include Config
 ENV['TEST_MODE'] = 'TRUE'
 
@@ -141,7 +146,7 @@ task :ydoc do
   require File.join(File.dirname(__FILE__), 'lib', 'mongo')
   out = File.join('ydoc', Mongo::VERSION)
   FileUtils.rm_rf('ydoc')
-  system "yardoc lib/**/*.rb lib/mongo/**/*.rb lib/bson/**/*.rb -e yard/yard_ext.rb -p yard/templates -o #{out} --title MongoRuby-#{Mongo::VERSION} --files docs/TUTORIAL.md,docs/GridFS.md,docs/FAQ.md,docs/REPLICA_SETS.md,docs/WRITE_CONCERN.md,docs/HISTORY.md,docs/CREDITS.md,docs/RELEASES.md"
+  system "yardoc lib/**/*.rb lib/mongo/**/*.rb lib/bson/**/*.rb -e ./yard/yard_ext.rb -p yard/templates -o #{out} --title MongoRuby-#{Mongo::VERSION} --files docs/TUTORIAL.md,docs/GridFS.md,docs/FAQ.md,docs/REPLICA_SETS.md,docs/WRITE_CONCERN.md,docs/READ_PREFERENCE.md,docs/HISTORY.md,docs/CREDITS.md,docs/RELEASES.md,docs/CREDITS.md,docs/TAILABLE_CURSORS.md"
 end
 
 namespace :bamboo do
@@ -154,11 +159,11 @@ namespace :bamboo do
   end
 
   namespace :test do
-    task :ruby => [:ci_reporter, "ci:setup:testunit"] do
+    task :ruby do
       Rake::Task['test:ruby'].invoke
     end
 
-    task :c => [:ci_reporter, "ci:setup:testunit"] do
+    task :c do
       Rake::Task['gem:install_extensions'].invoke
       Rake::Task['test:c'].invoke
     end

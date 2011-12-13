@@ -5,7 +5,7 @@ class CollectionTest < Test::Unit::TestCase
   context "Basic operations: " do
     setup do
       @logger = mock()
-      @logger.expects(:debug)
+      @logger.expects(:warn)
     end
 
     should "send update message" do
@@ -15,7 +15,7 @@ class CollectionTest < Test::Unit::TestCase
       @conn.expects(:send_message).with do |op, msg, log|
         op == 2001
       end
-      @conn.stubs(:log_operation)
+      @coll.stubs(:log_operation)
       @coll.update({}, {:title => 'Moby Dick'})
     end
 
@@ -26,7 +26,7 @@ class CollectionTest < Test::Unit::TestCase
       @conn.expects(:send_message).with do |op, msg, log|
         op == 2002
       end
-      @conn.expects(:log_operation).with do |name, payload|
+      @coll.expects(:log_operation).with do |name, payload|
         (name == :insert) && payload[:documents][0][:title].include?('Moby')
       end
       @coll.insert({:title => 'Moby Dick'})
@@ -36,12 +36,11 @@ class CollectionTest < Test::Unit::TestCase
       @conn = Connection.new('localhost', 27017, :logger => @logger, :connect => false)
       @db   = @conn['testing']
       @coll = @db.collection('books')
+      @conn.expects(:checkout_writer).returns(mock())
       @conn.expects(:receive_message).with do |op, msg, log, sock|
         op == 2004
       end.returns([[], 0, 0])
-      @conn.expects(:log_operation).with do |name, payload|
-        (name == :find) && payload[:selector][:title].include?('Moby')
-      end
+      @logger.expects(:debug)
       @coll.find({:title => 'Moby Dick'}).sort([['title', 1], ['author', 1]]).next_document
     end
 
@@ -53,7 +52,7 @@ class CollectionTest < Test::Unit::TestCase
       @conn.expects(:send_message).with do |op, msg, log|
         op == 2002
       end
-      @conn.expects(:log_operation).with do |name, payload|
+      @coll.expects(:log_operation).with do |name, payload|
         (name == :insert) && payload[:documents][0][:data].inspect.include?('Binary')
       end
       @coll.insert({:data => data})
@@ -66,7 +65,7 @@ class CollectionTest < Test::Unit::TestCase
       @conn.expects(:send_message_with_safe_check).with do |op, msg, db_name, log|
         op == 2001
       end
-      @conn.expects(:log_operation).with do |name, payload|
+      @coll.expects(:log_operation).with do |name, payload|
         (name == :update) && payload[:document][:title].include?('Moby')
       end
       @coll.update({}, {:title => 'Moby Dick'}, :safe => true)
@@ -79,7 +78,7 @@ class CollectionTest < Test::Unit::TestCase
       @conn.expects(:send_message_with_safe_check).with do |op, msg, db_name, log|
         op == 2001
       end
-      @conn.stubs(:log_operation)
+      @coll.stubs(:log_operation)
       @coll.update({}, {:title => 'Moby Dick'}, :safe => true)
     end
 
@@ -125,6 +124,16 @@ class CollectionTest < Test::Unit::TestCase
       end
 
       @coll.ensure_index [["x", Mongo::DESCENDING], ["y", Mongo::DESCENDING]]
+    end
+
+    should "use the connection's logger" do
+      @conn = Connection.new('localhost', 27017, :logger => @logger, :connect => false)
+      @db   = @conn['testing']
+      @coll = @db.collection('books')
+      @logger.expects(:warn).with do |msg|
+        msg == "MONGODB [WARNING] test warning"
+      end
+      @coll.log(:warn, "test warning")
     end
   end
 end

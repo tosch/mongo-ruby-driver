@@ -63,7 +63,7 @@ module Mongo
     # @option opts [Boolean] :strict (False) If true, collections must exist to be accessed and must
     #   not exist to be created. See DB#collection and DB#create_collection.
     #
-    # @option opts [Object, #create_pk(doc)] :pk (Mongo::ObjectId) A primary key factory object,
+    # @option opts [Object, #create_pk(doc)] :pk (BSON::ObjectId) A primary key factory object,
     #   which should take a hash and return a hash which merges the original hash with any primary key
     #   fields the factory wishes to inject. (NOTE: if the object already has a primary key,
     #   the factory should not inject a new key).
@@ -82,6 +82,12 @@ module Mongo
       @strict     = opts[:strict]
       @pk_factory = opts[:pk]
       @safe       = opts.fetch(:safe, @connection.safe)
+      if value = opts[:read]
+        Mongo::Support.validate_read_preference(value)
+      else
+        value = @connection.read_preference
+      end
+      @read_preference = value.is_a?(Hash) ? value.dup : value
       @cache_time = opts[:cache_time] || 300 #5 minutes.
     end
 
@@ -121,13 +127,14 @@ module Mongo
       auth['user'] = username
       auth['nonce'] = nonce
       auth['key'] = Mongo::Support.auth_key(username, password, nonce)
-      if ok?(self.command(auth, :check_response => false, :socket => opts[:socket]))
+      if ok?(doc = self.command(auth, :check_response => false, :socket => opts[:socket]))
         if save_auth
           @connection.add_auth(@name, username, password)
         end
         true
       else
-        raise(Mongo::AuthenticationError, "Failed to authenticate user '#{username}' on db '#{self.name}'")
+        message = "Failed to authenticate user '#{username}' on db '#{self.name}'"
+        raise Mongo::AuthenticationError.new(message, doc['code'], doc)
       end
     end
 
@@ -269,7 +276,8 @@ module Mongo
     #
     # @return [Mongo::Collection]
     def create_collection(name, opts={})
-      if collection_names.include?(name.to_s)
+      name = name.to_s
+      if collection_names.include?(name)
         if strict?
           raise MongoDBError, "Collection #{name} already exists. " +
             "Currently in strict mode."
@@ -503,7 +511,13 @@ module Mongo
       if result.nil?
         raise OperationFailure, "Database command '#{selector.keys.first}' failed: returned null."
       elsif (check_response && !ok?(result))
-        raise OperationFailure, "Database command '#{selector.keys.first}' failed: #{result.inspect}"
+        message = "Database command '#{selector.keys.first}' failed: ("
+        message << result.map do |key, value|
+          "#{key}: '#{value}'"
+        end.join('; ')
+        message << ').'
+        code = result['code'] || result['assertionCode']
+        raise OperationFailure.new(message, code, result)
       else
         result
       end
@@ -606,6 +620,13 @@ module Mongo
         raise MongoDBError, "Error: invalid collection #{name}: #{doc.inspect}"
       end
       doc
+    end
+
+    # The value of the read preference. This will be
+    # either +:primary+, +:secondary+, or an object
+    # representing the tags to be read from.
+    def read_preference
+      @read_preference
     end
 
     private

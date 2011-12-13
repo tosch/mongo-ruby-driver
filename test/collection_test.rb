@@ -15,7 +15,7 @@ class TestCollection < Test::Unit::TestCase
     assert !@@db['normal'].capped?
     @@db.drop_collection('normal')
 
-    @@db.create_collection('c', :capped => true)
+    @@db.create_collection('c', :capped => true, :size => 100_000)
     assert @@db['c'].capped?
     @@db.drop_collection('c')
   end
@@ -151,6 +151,35 @@ class TestCollection < Test::Unit::TestCase
     end
   end
 
+  def test_bulk_insert_with_continue_on_error
+    if @@version >= "2.0"
+      @@test.create_index([["foo", 1]], :unique => true)
+      docs = []
+      docs << {:foo => 1}
+      docs << {:foo => 1}
+      docs << {:foo => 2}
+      docs << {:foo => 3}
+      assert_raise OperationFailure do
+        @@test.insert(docs, :safe => true)
+      end
+      assert_equal 1, @@test.count
+      @@test.remove
+
+      docs = []
+      docs << {:foo => 1}
+      docs << {:foo => 1}
+      docs << {:foo => 2}
+      docs << {:foo => 3}
+      assert_raise OperationFailure do
+        @@test.insert(docs, :safe => true, :continue_on_error => true)
+      end
+      assert_equal 3, @@test.count
+
+      @@test.remove
+      @@test.drop_index("foo_1")
+    end
+  end
+
   def test_maximum_insert_size
     docs = []
     16.times do
@@ -174,6 +203,14 @@ class TestCollection < Test::Unit::TestCase
       assert_raise_error ArgumentError, "Unknown key(s): wtime" do
         @@test.remove({:foo => 2}, :safe => {:w => 2, :wtime => 1, :fsync => true})
       end
+    end
+  end
+
+  if @@version >= "2.0.0"
+    def test_safe_mode_with_journal_commit_option
+      @@test.insert({:foo => 1}, :safe => {:j => true})
+      @@test.update({:foo => 1}, {:foo => 2}, :safe => {:j => true})
+      @@test.remove({:foo => 2}, :safe => {:j => true})
     end
   end
 
@@ -272,6 +309,7 @@ class TestCollection < Test::Unit::TestCase
     @conn = standard_connection
     @db   = @conn[MONGO_TEST_DB]
     @test = @db['test-safe-remove']
+    @test.remove
     @test.save({:a => 50})
     assert_equal 1, @test.remove({}, :safe => true)["n"]
     @test.drop
@@ -285,9 +323,13 @@ class TestCollection < Test::Unit::TestCase
     @@test.drop
 
     assert_equal 0, @@test.count
-    @@test.save("x" => 1)
-    @@test.save("x" => 2)
+    @@test.save(:x => 1)
+    @@test.save(:x => 2)
     assert_equal 2, @@test.count
+
+    assert_equal 1, @@test.count(:query => {:x => 1})
+    assert_equal 1, @@test.count(:limit => 1)
+    assert_equal 0, @@test.count(:skip => 2)
   end
 
   # Note: #size is just an alias for #count.
@@ -627,13 +669,13 @@ class TestCollection < Test::Unit::TestCase
 
     @@test.ensure_index([["x", Mongo::DESCENDING]], {})
     assert_equal 2, @@test.index_information.keys.count
-    assert @@test.index_information.keys.include? "x_-1"
+    assert @@test.index_information.keys.include?("x_-1")
 
     @@test.ensure_index([["x", Mongo::ASCENDING]])
-    assert @@test.index_information.keys.include? "x_1"
+    assert @@test.index_information.keys.include?("x_1")
 
     @@test.ensure_index([["type", 1], ["date", -1]])
-    assert @@test.index_information.keys.include? "type_1_date_-1"
+    assert @@test.index_information.keys.include?("type_1_date_-1")
 
     @@test.drop_index("x_1")
     assert_equal 3, @@test.index_information.keys.count
@@ -642,7 +684,7 @@ class TestCollection < Test::Unit::TestCase
 
     @@test.ensure_index([["x", Mongo::DESCENDING]], {})
     assert_equal 3, @@test.index_information.keys.count
-    assert @@test.index_information.keys.include? "x_-1"
+    assert @@test.index_information.keys.include?("x_-1")
 
     # Make sure that drop_index expires cache properly
     @@test.ensure_index([['a', 1]])
@@ -669,6 +711,26 @@ class TestCollection < Test::Unit::TestCase
     sleep(3)
     # This won't be, so generate_indexes will be called twice
     coll.ensure_index([['a', 1]])
+  end
+
+
+  if @@version > '2.0.0'
+    def test_show_disk_loc
+      @@test.save({:a => 1})
+      @@test.save({:a => 2})
+      assert @@test.find({:a => 1}, :show_disk_loc => true).show_disk_loc
+      assert @@test.find({:a => 1}, :show_disk_loc => true).next['$diskLoc']
+      @@test.remove
+    end
+
+    def test_max_scan
+      1000.times do |n|
+        @@test.save({:a => n})
+      end
+      assert @@test.find({:a => 999}).next
+      assert !@@test.find({:a => 999}, :max_scan => 500).next
+      @@test.remove
+    end
   end
 
   context "Grouping" do
@@ -749,6 +811,7 @@ class TestCollection < Test::Unit::TestCase
   context "A collection with two records" do
     setup do
       @collection = @@db.collection('test-collection')
+      @collection.remove
       @collection.insert({:name => "Jones"})
       @collection.insert({:name => "Smith"})
     end

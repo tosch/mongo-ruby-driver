@@ -1,9 +1,63 @@
 # MongoDB Ruby Driver History
 
-### 1.4.0
-UNRELEASED
+### 1.5.1
+2011-11-29
 
+Release due to corrupted gemspec. This was a bug having
+to do with rubygems. Apparently, gems must still be
+built with Ruby 1.8.
+
+### 1.5.0
+2011-11-28
+
+This releases fixes bugs introduced in 1.4.0 and 1.4.1 that
+were introduced as a result of adding replica set refresh modes.
+
+* Removed :async refresh mode.
+* Disabled auto refresh mode by default. If you want the driver
+to automatically check the state of the replica set, you must
+use :sync mode. Note that replica set refresh is designed only to
+account for benign changes to the replica set (adding and removing
+nodes that don't affect current connections).
+* Fixed bug with commands being sent to secondary nodes. The next
+release will allow you to specify where commands can be sent.
+* Support :j safe mode option.
+* Fix :max_scan and :show_disk_loc Cursor options.
+
+You can see the remaining issues at https://jira.mongodb.org/secure/ReleaseNote.jspa?projectId=10005&version=10992
+
+### 1.5.0.rc0
+2011-11-18
+
+Fix bugs associated with replica set refresh.
+
+### 1.4.1
+2011-10-17
+
+If you're using 1.4.0, this is a necessary upgrade.
+
+* Simplified replica set refresh.
+* Fix bugs associated with replica set refresh.
+* Make cursor smart enough to continue functioning
+even if a refresh is triggered.
+
+### 1.4.0
+2011-9-19
+
+* Attempt to automatically refresh internal replica set state using ReplSetConnection#refresh.
+* Two automated refresh modes: :async and :sync. Automated refresh can also be disabled.
+* Choose secondary for reads based on ping time.
+* Read preference API: specify whether queries should go to primary or secondary on a per-query basis.
+* Pass :require_primary => false to ReplSetConnection to connect without requiring a primary node.
+* Enable exhaust-mode queries with OP_QUERY_EXHAUST.
+* Collection#count takes a query selector.
+* Support continue_on_error flag for bulk inserts (use :continue_on_error => true)
 * Add Cursor#add_option. Deprecate Cursor#query_opts and replace with Cursor#options.
+* Initial SSL support (connect with :ssl => true)
+* Update to latest Java driver for JRuby.
+* Check max BSON size on a per-connection basis.
+* Fixed two platform-specific BSON serialization issues.
+* Lots of bug fixes and code cleanup.
 
 ### 1.3.1
 2011-5-10
@@ -48,8 +102,8 @@ UNRELEASED
 
 * Fix the exception message shown when there's an IOError (Mauro Pompilio)
 * Another update to map-reduce docs for v1.8. Note that if you use the new
-  output option {:out => {:inline => true}}, then you must also specify
-  :raw => true.
+  output option `{:out => {:inline => true}}`, then you must also specify
+  `:raw => true`.
 
 ### 1.2.3
 2011-2-22

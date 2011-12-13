@@ -15,10 +15,10 @@ cache the replica set topology as reported by the given seed node and use that i
 
 ### Read slaves
 
-If you want to read from a seconday node, you can pass :read_secondary => true to ReplSetConnection#new.
+If you want to read from a secondary node, you can pass :read => :secondary to ReplSetConnection#new.
 
     @connection = ReplSetConnection.new(['n1.mydb.net', 27017], ['n2.mydb.net', 27017], ['n3.mydb.net', 27017],
-                  :read_secondary => true)
+                  :read => :secondary)
 
 A random secondary will be chosen to be read from. In a typical multi-process Ruby application, you'll have a good distribution of reads across secondary nodes.
 
@@ -28,9 +28,42 @@ Imagine that either the master node or one of the read nodes goes offline. How w
 
 If any read operation fails, the driver will raise a *ConnectionFailure* exception. It then becomes the client's responsibility to decide how to handle this.
 
-If the client decides to retry, it's not guaranteed that another member of the replica set will have been promoted to master right away, so it's still possible that the driver will raise another *ConnectionFailure*. However, once a member has been promoted to master, typically within a few seconds, subsequent operations will succeed.
+If the client decides to retry, it's not guaranteed that another member of the replica set will have been promoted to master right away, so it's still possible that the driver will raise another *ConnectionFailure*. However, once a member has been promoted to master, typically within a few seconds, subsequent operations will succeed. *Note that this does not prevent
+exception in the event of a primary failover.*
 
 The driver will essentially cycle through all known seed addresses until a node identifies itself as master.
+
+### Refresh mode
+
+You can now specify a refresh mode and refresh interval for a replica set connection. This will help to ensure that
+changes to a replica set's configuration are quickly reflected on the driver side. In particular, if you change
+the state of any secondary node, the automated refresh will ensure that this state is recorded on the client side.
+If you add a secondary that responds to pings much faster than the existing nodes, then the new secondary will
+be used for reads.
+
+Refresh mode is disabled by default.
+
+However, if you expect to make live changes to your secondaries, and you want this to be reflected without
+having to manually restart your app server, then you should enable it. You can enable this mode
+synchronously, which will refresh the replica set data in a synchronous fashion (which may
+ocassionally slow down your queries):
+
+    @connection = ReplSetConnection.new(['n1.mydb.net', 27017], :refresh_mode => :sync)
+
+If you want to change the default refresh interval of 90 seconds, you can do so like this:
+
+    @connection = ReplSetConnection.new(['n1.mydb.net', 27017], :refresh_mode => :sync,
+        :refresh_interval => 60)
+
+Do not set this value to anything lower than 30, or you may start to experience performance issues.
+
+You can also disable refresh mode altogether:
+
+    @connection = ReplSetConnection.new(['n1.mydb.net', 27017], :refresh_mode => false)
+
+And you can call `refresh` manually on any replica set connection:
+
+    @connection.refresh
 
 ### Recovery
 

@@ -22,20 +22,19 @@ class TestConnection < Test::Unit::TestCase
     end
   end
 
-  def test_connection_timeout
-    passed = false
-    begin
-      t0 = Time.now
-      Mongo::Connection.new('192.169.169.1', 27017, :connect_timeout => 3)
-    rescue OperationTimeout
-      passed = true
-      t1 = Time.now
-    end
+ # def test_connection_timeout
+ #   passed = false
+ #   begin
+ #     t0 = Time.now
+ #     Mongo::Connection.new('foo.bar', 27017, :connect_timeout => 3)
+ #   rescue OperationTimeout
+ #     passed = true
+ #     t1 = Time.now
+ #   end
 
-    assert passed
-    assert t1 - t0 < 4
-  end
-
+ #   assert passed
+ #   assert t1 - t0 < 4
+ # end
 
   def test_host_port_accessors
     assert_equal @conn.host, TEST_HOST
@@ -279,6 +278,42 @@ class TestConnection < Test::Unit::TestCase
     end
   end
 
+  context "Socket pools" do
+    context "checking out writers" do
+      setup do
+        @con = standard_connection(:pool_size => 10, :timeout => 10)
+        @coll = @con[MONGO_TEST_DB]['test-connection-exceptions']
+      end
+
+      should "close the connection on send_message for major exceptions" do
+        @con.expects(:checkout_writer).raises(SystemStackError)
+        @con.expects(:close)
+        begin
+          @coll.insert({:foo => "bar"})
+        rescue SystemStackError
+        end
+      end
+
+      should "close the connection on send_message_with_safe_check for major exceptions" do
+        @con.expects(:checkout_writer).raises(SystemStackError)
+        @con.expects(:close)
+        begin
+          @coll.insert({:foo => "bar"}, :safe => true)
+        rescue SystemStackError
+        end
+      end
+
+      should "close the connection on receive_message for major exceptions" do
+        @con.expects(:checkout_writer).raises(SystemStackError)
+        @con.expects(:close)
+        begin
+          @coll.find.next
+        rescue SystemStackError
+        end
+      end
+    end
+  end
+
   context "Connection exceptions" do
     setup do
       @con = standard_connection(:pool_size => 10, :timeout => 10)
@@ -319,7 +354,7 @@ class TestConnection < Test::Unit::TestCase
       TCPSocket.stubs(:new).returns(fake_socket)
 
       @con.primary_pool.checkout_new_socket
-      assert_equal [], @con.primary_pool.close
+      assert @con.primary_pool.close
     end
   end
 end

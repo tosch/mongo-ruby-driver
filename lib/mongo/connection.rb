@@ -19,28 +19,27 @@
 require 'set'
 require 'socket'
 require 'thread'
-
 module Mongo
 
-  # Instantiates and manages connections to MongoDB.
+  # Instantiates and manages self.connections to MongoDB.
   class Connection
+    include Mongo::Logging
+    include Mongo::Networking
+
     TCPSocket = ::TCPSocket
     UNIXSocket = ::UNIXSocket
     Mutex = ::Mutex
     ConditionVariable = ::ConditionVariable
 
-    # Abort connections if a ConnectionError is raised.
     Thread.abort_on_exception = true
 
     DEFAULT_PORT = 27017
-    STANDARD_HEADER_SIZE = 16
-    RESPONSE_HEADER_SIZE = 20
+
+    mongo_thread_local_accessor :connections
 
     attr_reader :logger, :size, :auths, :primary, :safe, :host_to_try,
-      :pool_size, :connect_timeout, :primary_pool
-
-    # Counter for generating unique request ids.
-    @@current_request_id = 0
+      :pool_size, :connect_timeout, :pool_timeout,
+      :primary_pool, :socket_class
 
     # Create a connection to single MongoDB instance.
     #
@@ -66,15 +65,16 @@ module Mongo
     #   to a single, slave node.
     # @option opts [Logger, #debug] :logger (nil) A Logger instance for debugging driver ops. Note that
     #   logging negatively impacts performance; therefore, it should not be used for high-performance apps.
-    # @option opts [Integer] :pool_size (1) The maximum number of socket connections allowed per
+    # @option opts [Integer] :pool_size (1) The maximum number of socket self.connections allowed per
     #   connection pool. Note: this setting is relevant only for multi-threaded applications.
-    # @option opts [Float] :pool_timeout (5.0) When all of the connections a pool are checked out,
+    # @option opts [Float] :pool_timeout (5.0) When all of the self.connections a pool are checked out,
     #   this is the number of seconds to wait for a new connection to be released before throwing an exception.
     #   Note: this setting is relevant only for multi-threaded applications (which in Ruby are rare).
     # @option opts [Float] :op_timeout (nil) The number of seconds to wait for a read operation to time out.
     #   Disabled by default.
     # @option opts [Float] :connect_timeout (nil) The number of seconds to wait before timing out a
     #   connection attempt.
+    # @option opts [Boolean] :ssl (false) If true, create the connection to the server using SSL.
     #
     # @example localhost, 27017
     #   Connection.new
@@ -82,7 +82,7 @@ module Mongo
     # @example localhost, 27017
     #   Connection.new("localhost")
     #
-    # @example localhost, 3000, max 5 connections, with max 5 seconds of wait time.
+    # @example localhost, 3000, max 5 self.connections, with max 5 seconds of wait time.
     #   Connection.new("localhost", 3000, :pool_size => 5, :timeout => 5)
     #
     # @example localhost, 3000, where this node may be a slave
@@ -96,7 +96,7 @@ module Mongo
     # @raise [ReplicaSetConnectionError] This is raised if a replica set name is specified and the
     #   driver fails to connect to a replica set with that name.
     #
-    # @core connections
+    # @core self.connections
     def initialize(host=nil, port=nil, opts={})
       @host_to_try = format_pair(host, port)
 
@@ -136,7 +136,7 @@ module Mongo
     #
     # @deprecated
     def self.multi(nodes, opts={})
-      warn "Connection.multi is now deprecated. Please use ReplSetConnection.new instead."
+      warn "Connection.multi is now deprecated and will be removed in v2.0. Please use ReplSetConnection.new instead."
 
       nodes << opts
       ReplSetConnection.new(*nodes)
@@ -314,7 +314,7 @@ module Mongo
     #
     # @core databases []-instance_method
     def [](db_name)
-      DB.new(db_name, self, :safe => @safe)
+      DB.new(db_name, self)
     end
 
     # Drop a database.
@@ -384,119 +384,12 @@ module Mongo
       @slave_ok
     end
 
-    # Send a message to MongoDB, adding the necessary headers.
-    #
-    # @param [Integer] operation a MongoDB opcode.
-    # @param [BSON::ByteBuffer] message a message to send to the database.
-    #
-    # @option opts [Symbol] :connection (:writer) The connection to which
-    #   this message should be sent. Valid options are :writer and :reader.
-    #
-    # @return [Integer] number of bytes sent
-    def send_message(operation, message, opts={})
-      if opts.is_a?(String)
-        warn "Connection#send_message no longer takes a string log message. " +
-          "Logging is now handled within the Collection and Cursor classes."
-        opts = {}
-      end
-
-      connection = opts.fetch(:connection, :writer)
-
-      begin
-        add_message_headers(message, operation)
-        packed_message = message.to_s
-
-        if connection == :writer
-          socket = checkout_writer
-        else
-          socket = checkout_reader
-        end
-
-        send_message_on_socket(packed_message, socket)
-      ensure
-        if connection == :writer
-          checkin_writer(socket)
-        else
-          checkin_reader(socket)
-        end
-      end
-    end
-
-    # Sends a message to the database, waits for a response, and raises
-    # an exception if the operation has failed.
-    #
-    # @param [Integer] operation a MongoDB opcode.
-    # @param [BSON::ByteBuffer] message a message to send to the database.
-    # @param [String] db_name the name of the database. used on call to get_last_error.
-    # @param [Hash] last_error_params parameters to be sent to getLastError. See DB#error for
-    #   available options.
-    #
-    # @see DB#get_last_error for valid last error params.
-    #
-    # @return [Hash] The document returned by the call to getlasterror.
-    def send_message_with_safe_check(operation, message, db_name, log_message=nil, last_error_params=false)
-      docs = num_received = cursor_id = ''
-      add_message_headers(message, operation)
-
-      last_error_message = BSON::ByteBuffer.new
-      build_last_error_message(last_error_message, db_name, last_error_params)
-      last_error_id = add_message_headers(last_error_message, Mongo::Constants::OP_QUERY)
-
-      packed_message = message.append!(last_error_message).to_s
-      begin
-        sock = checkout_writer
-        @safe_mutexes[sock].synchronize do
-          send_message_on_socket(packed_message, sock)
-          docs, num_received, cursor_id = receive(sock, last_error_id)
-        end
-      ensure
-        checkin_writer(sock)
-      end
-
-      if num_received == 1 && (error = docs[0]['err'] || docs[0]['errmsg'])
-        close if error == "not master"
-        error = "wtimeout" if error == "timeout"
-        raise Mongo::OperationFailure, docs[0]['code'].to_s + ': ' + error
-      end
-
-      docs[0]
-    end
-
-    # Sends a message to the database and waits for the response.
-    #
-    # @param [Integer] operation a MongoDB opcode.
-    # @param [BSON::ByteBuffer] message a message to send to the database.
-    # @param [String] log_message this is currently a no-op and will be removed.
-    # @param [Socket] socket a socket to use in lieu of checking out a new one.
-    # @param [Boolean] command (false) indicate whether this is a command. If this is a command,
-    #   the message will be sent to the primary node.
-    #
-    # @return [Array]
-    #   An array whose indexes include [0] documents returned, [1] number of document received,
-    #   and [3] a cursor_id.
-    def receive_message(operation, message, log_message=nil, socket=nil, command=false)
-      request_id = add_message_headers(message, operation)
-      packed_message = message.to_s
-      begin
-        if socket
-          sock = socket
-          checkin = false
-        else
-          sock = (command ? checkout_writer : checkout_reader)
-          checkin = true
-        end
-
-        result = ''
-        @safe_mutexes[sock].synchronize do
-          send_message_on_socket(packed_message, sock)
-          result = receive(sock, request_id)
-        end
-      ensure
-        if checkin
-          command ? checkin_writer(sock) : checkin_reader(sock)
-        end
-      end
-      result
+    def get_socket_from_thread_local
+      Thread.current[:socket_map] ||= {}
+      Thread.current[:socket_map][self] ||= {}
+      Thread.current[:socket_map][self][:writer] ||= checkout_writer
+      Thread.current[:socket_map][self][:reader] = 
+        Thread.current[:socket_map][self][:writer]
     end
 
     # Create a new socket and attempt to connect to master.
@@ -535,7 +428,7 @@ module Mongo
     # NOTE: Do check if this needs to be more stringent.
     # Probably not since if any node raises a connection failure, all nodes will be closed.
     def connected?
-      @primary_pool && @primary_pool.host && @primary_pool.port
+      @primary_pool && !@primary_pool.closed?
     end
 
     # Determine if the connection is active. In a normal case the *server_info* operation
@@ -562,6 +455,22 @@ module Mongo
       @read_primary
     end
     alias :primary? :read_primary?
+
+    # The socket pool that this connection reads from.
+    #
+    # @return [Mongo::Pool]
+    def read_pool
+      @primary_pool
+    end
+
+    # The value of the read preference.
+    def read_preference
+      if slave_ok?
+        :secondary
+      else
+        :primary
+      end
+    end
 
     # Close the connection to the database.
     def close
@@ -595,43 +504,20 @@ module Mongo
     # Checkin a socket used for reading.
     # Note: this is overridden in ReplSetConnection.
     def checkin_reader(socket)
-      if @primary_pool
-        @primary_pool.checkin(socket)
-      end
+      checkin(socket)
     end
 
     # Checkin a socket used for writing.
     # Note: this is overridden in ReplSetConnection.
     def checkin_writer(socket)
+      checkin(socket)
+    end
+
+    # Check a socket back into its pool.
+    def checkin(socket)
       if @primary_pool
         @primary_pool.checkin(socket)
       end
-    end
-
-    # Log a message with the given level.
-    def log(level, message)
-      return unless @logger
-      case level
-        when :debug then
-          @logger.debug "MONGODB [DEBUG] #{msg}"
-        when :warn then
-          @logger.warn "MONGODB [WARNING] #{msg}"
-        when :error then
-          @logger.error "MONGODB [ERROR] #{msg}"
-        when :fatal then
-          @logger.fatal "MONGODB [FATAL] #{msg}"
-        else
-          @logger.info "MONGODB [INFO] #{msg}"
-      end
-    end
-
-    # Execute the block and log the operation described by name
-    # and payload.
-    # TODO: Not sure if this should take a block.
-    def instrument(name, payload = {}, &blk)
-      res = yield
-      log_operation(name, payload)
-      res
     end
 
     def to_s
@@ -649,6 +535,14 @@ module Mongo
       # Default maximum BSON object size
       @max_bson_size = Mongo::DEFAULT_MAX_BSON_SIZE
 
+      # Determine whether to use SSL.
+      @ssl = opts.fetch(:ssl, false)
+      if @ssl
+        @socket_class = Mongo::SSLSocket
+      else
+        @socket_class = ::TCPSocket
+      end
+
       # Authentication objects
       @auths = opts.fetch(:auths, [])
 
@@ -661,7 +555,7 @@ module Mongo
         warn "The :timeout option has been deprecated " +
           "and will be removed in the 2.0 release. Use :pool_timeout instead."
       end
-      @timeout = opts[:pool_timeout] || opts[:timeout] || 5.0
+      @pool_timeout = opts[:pool_timeout] || opts[:timeout] || 5.0
 
       # Timeout on socket read operation.
       @op_timeout = opts[:op_timeout] || nil
@@ -670,14 +564,11 @@ module Mongo
       @connect_timeout = opts[:connect_timeout] || nil
 
       # Mutex for synchronizing pool access
+      # TODO: remove this.
       @connection_mutex = Mutex.new
 
       # Global safe option. This is false by default.
       @safe = opts[:safe] || false
-
-      # Create a mutex when a new key, in this case a socket,
-      # is added to the hash.
-      @safe_mutexes = Hash.new { |h, k| h[k] = Mutex.new }
 
       # Condition variable for signal and wait
       @queue = ConditionVariable.new
@@ -689,8 +580,7 @@ module Mongo
       @logger = opts[:logger] || nil
 
       if @logger
-        @logger.debug("MongoDB logging. Please note that logging negatively impacts performance " +
-        "and should be disabled for high-performance production apps.")
+        write_logging_startup_message
       end
 
       should_connect = opts.fetch(:connect, true)
@@ -715,18 +605,6 @@ module Mongo
         when nil
           ['localhost', DEFAULT_PORT]
       end
-    end
-
-    ## Logging methods
-
-    def log_operation(name, payload)
-      return unless @logger
-      msg = "#{payload[:database]}['#{payload[:collection]}'].#{name}("
-      msg += payload.values_at(:selector, :document, :documents, :fields ).compact.map(&:inspect).join(', ') + ")"
-      msg += ".skip(#{payload[:skip]})"  if payload[:skip]
-      msg += ".limit(#{payload[:limit]})"  if payload[:limit]
-      msg += ".sort(#{payload[:order]})"  if payload[:order]
-      @logger.debug "MONGODB #{msg}"
     end
 
     private
@@ -794,197 +672,7 @@ module Mongo
     def set_primary(node)
       host, port = *node
       @primary = [host, port]
-      @primary_pool = Pool.new(self, host, port, :size => @pool_size, :timeout => @timeout)
-    end
-
-    ## Low-level connection methods.
-
-    def receive(sock, expected_response)
-      begin
-      receive_header(sock, expected_response)
-      number_received, cursor_id = receive_response_header(sock)
-      read_documents(number_received, cursor_id, sock)
-      rescue Mongo::ConnectionFailure => ex
-        close
-        raise ex
-      end
-    end
-
-    def receive_header(sock, expected_response)
-      header = receive_message_on_socket(16, sock)
-      size, request_id, response_to = header.unpack('VVV')
-      if expected_response != response_to
-        raise Mongo::ConnectionFailure, "Expected response #{expected_response} but got #{response_to}"
-      end
-
-      unless header.size == STANDARD_HEADER_SIZE
-        raise "Short read for DB response header: " +
-          "expected #{STANDARD_HEADER_SIZE} bytes, saw #{header.size}"
-      end
-      nil
-    end
-
-    def receive_response_header(sock)
-      header_buf = receive_message_on_socket(RESPONSE_HEADER_SIZE, sock)
-      if header_buf.length != RESPONSE_HEADER_SIZE
-        raise "Short read for DB response header; " +
-          "expected #{RESPONSE_HEADER_SIZE} bytes, saw #{header_buf.length}"
-      end
-      flags, cursor_id_a, cursor_id_b, starting_from, number_remaining = header_buf.unpack('VVVVV')
-      check_response_flags(flags)
-      cursor_id = (cursor_id_b << 32) + cursor_id_a
-      [number_remaining, cursor_id]
-    end
-
-    def check_response_flags(flags)
-      if flags & Mongo::Constants::REPLY_CURSOR_NOT_FOUND != 0
-        raise Mongo::OperationFailure, "Query response returned CURSOR_NOT_FOUND. " +
-          "Either an invalid cursor was specified, or the cursor may have timed out on the server."
-      elsif flags & Mongo::Constants::REPLY_QUERY_FAILURE != 0
-        # Getting odd failures when a exception is raised here.
-      end
-    end
-
-    def read_documents(number_received, cursor_id, sock)
-      docs = []
-      number_remaining = number_received
-      while number_remaining > 0 do
-        buf = receive_message_on_socket(4, sock)
-        size = buf.unpack('V')[0]
-        buf << receive_message_on_socket(size - 4, sock)
-        number_remaining -= 1
-        docs << BSON::BSON_CODER.deserialize(buf)
-      end
-      [docs, number_received, cursor_id]
-    end
-
-    # Constructs a getlasterror message. This method is used exclusively by
-    # Connection#send_message_with_safe_check.
-    #
-    # Because it modifies message by reference, we don't need to return it.
-    def build_last_error_message(message, db_name, opts)
-      message.put_int(0)
-      BSON::BSON_RUBY.serialize_cstr(message, "#{db_name}.$cmd")
-      message.put_int(0)
-      message.put_int(-1)
-      cmd = BSON::OrderedHash.new
-      cmd[:getlasterror] = 1
-      if opts.is_a?(Hash)
-        opts.assert_valid_keys(:w, :wtimeout, :fsync)
-        cmd.merge!(opts)
-      end
-      message.put_binary(BSON::BSON_CODER.serialize(cmd, false).to_s)
-      nil
-    end
-
-    # Prepares a message for transmission to MongoDB by
-    # constructing a valid message header.
-    #
-    # Note: this method modifies message by reference.
-    #
-    # @return [Integer] the request id used in the header
-    def add_message_headers(message, operation)
-      headers = [
-        # Message size.
-        16 + message.size,
-
-        # Unique request id.
-        request_id = get_request_id,
-
-        # Response id.
-        0,
-
-        # Opcode.
-        operation
-      ].pack('VVVV')
-
-      message.prepend!(headers)
-
-      request_id
-    end
-
-    # Increment and return the next available request id.
-    #
-    # return [Integer]
-    def get_request_id
-      request_id = ''
-      @id_lock.synchronize do
-        request_id = @@current_request_id += 1
-      end
-      request_id
-    end
-
-    # Low-level method for sending a message on a socket.
-    # Requires a packed message and an available socket,
-    #
-    # @return [Integer] number of bytes sent
-    def send_message_on_socket(packed_message, socket)
-      begin
-      total_bytes_sent = socket.send(packed_message, 0)
-      if total_bytes_sent != packed_message.size
-        packed_message.slice!(0, total_bytes_sent)
-        while packed_message.size > 0
-          byte_sent = socket.send(packed_message, 0)
-          total_bytes_sent += byte_sent
-          packed_message.slice!(0, byte_sent)
-        end
-      end
-      total_bytes_sent
-      rescue => ex
-        close
-        raise ConnectionFailure, "Operation failed with the following exception: #{ex}"
-      end
-    end
-
-    # Low-level method for receiving data from socket.
-    # Requires length and an available socket.
-    def receive_message_on_socket(length, socket)
-      begin
-        if @op_timeout
-          message = nil
-          Mongo::TimeoutHandler.timeout(@op_timeout, OperationTimeout) do
-            message = receive_data(length, socket)
-          end
-        else
-          message = receive_data(length, socket)
-        end
-        rescue => ex
-          close
-
-          if ex.class == OperationTimeout
-            raise OperationTimeout, "Timed out waiting on socket read."
-          else
-            raise ConnectionFailure, "Operation failed with the following exception: #{ex}"
-          end
-      end
-      message
-    end
-
-    def receive_data(length, socket)
-      message = new_binary_string
-      socket.read(length, message)
-      raise ConnectionFailure, "connection closed" unless message && message.length > 0
-      if message.length < length
-        chunk = new_binary_string
-        while message.length < length
-          socket.read(length - message.length, chunk)
-          raise ConnectionFailure, "connection closed" unless chunk.length > 0
-          message << chunk
-        end
-      end
-      message
-    end
-
-    if defined?(Encoding)
-      BINARY_ENCODING = Encoding.find("binary")
-
-      def new_binary_string
-        "".force_encoding(BINARY_ENCODING)
-      end
-    else
-      def new_binary_string
-        ""
-      end
+      @primary_pool = Pool.new(self, host, port, :size => @pool_size, :timeout => @pool_timeout)
     end
   end
 end

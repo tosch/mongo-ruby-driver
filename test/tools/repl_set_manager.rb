@@ -10,7 +10,7 @@ end
 
 class ReplSetManager
 
-  attr_accessor :host, :start_port, :ports, :name, :mongods
+  attr_accessor :host, :start_port, :ports, :name, :mongods, :tags, :version
 
   def initialize(opts={})
     @start_port = opts[:start_port] || 30000
@@ -20,9 +20,14 @@ class ReplSetManager
     @retries    = opts[:retries] || 30
     @config     = {"_id" => @name, "members" => []}
     @durable    = opts.fetch(:durable, false)
+    @smallfiles = opts.fetch(:smallfiles, true)
     @path       = File.join(File.expand_path(File.dirname(__FILE__)), "data")
+    @oplog_size = opts.fetch(:oplog_size, 16)
+    @tags = [{"dc" => "ny", "rack" => "a", "db" => "main"},
+             {"dc" => "ny", "rack" => "b", "db" => "main"},
+             {"dc" => "sf", "rack" => "a", "db" => "main"}]
 
-    @arbiter_count   = opts[:arbiter_count]   || 2
+    @arbiter_count   = opts[:arbiter_count]   || 0
     @secondary_count = opts[:secondary_count] || 2
     @passive_count   = opts[:passive_count] || 0
     @primary_count   = 1
@@ -33,28 +38,36 @@ class ReplSetManager
     end
 
     @mongods   = {}
+    version_string = `mongod --version`
+    version_string =~ /(\d\.\d\.\d)/
+    @version = $1.split(".").map {|d| d.to_i }
   end
 
   def start_set
-    puts "** Starting a replica set with #{@count} nodes"
-
     system("killall mongod")
+    sleep(1)
+    should_start = true
+    puts "** Starting a replica set with #{@count} nodes"
 
     n = 0
     (@primary_count + @secondary_count).times do
-      init_node(n)
+      init_node(n, should_start) do |attrs|
+        if @version[0] >= 2
+          attrs['tags'] = @tags[n % @tags.size]
+        end
+      end
       n += 1
     end
 
     @passive_count.times do
-      init_node(n) do |attrs|
+      init_node(n, should_start) do |attrs|
         attrs['priority'] = 0
       end
       n += 1
     end
 
     @arbiter_count.times do
-      init_node(n) do |attrs|
+      init_node(n, should_start) do |attrs|
         attrs['arbiterOnly'] = true
       end
       n += 1
@@ -71,18 +84,20 @@ class ReplSetManager
     end
   end
 
-  def init_node(n)
+  def init_node(n, should_start=true)
     @mongods[n] ||= {}
     port = @start_port + n
     @ports << port
     @mongods[n]['port'] = port
     @mongods[n]['db_path'] = get_path("rs-#{port}")
     @mongods[n]['log_path'] = get_path("log-#{port}")
-    system("rm -rf #{@mongods[n]['db_path']}")
-    system("mkdir -p #{@mongods[n]['db_path']}")
-
     @mongods[n]['start'] = start_cmd(n)
-    start(n)
+
+    if should_start
+      system("rm -rf #{@mongods[n]['db_path']}")
+      system("mkdir -p #{@mongods[n]['db_path']}")
+      start(n)
+    end
 
     member = {'_id' => n, 'host' => "#{@host}:#{@mongods[n]['port']}"}
 
@@ -96,10 +111,23 @@ class ReplSetManager
     @config['members'] << member
   end
 
+  def journal_switch
+    if @version[0] >= 2
+      if @durable
+        "--journal"
+      else
+        "--nojournal"
+      end
+    elsif @durable
+      "--journal"
+    end
+  end
+
   def start_cmd(n)
     @mongods[n]['start'] = "mongod --replSet #{@name} --logpath '#{@mongods[n]['log_path']}' " +
-     " --dbpath #{@mongods[n]['db_path']} --port #{@mongods[n]['port']} --fork"
+     "--oplogSize #{@oplog_size} #{journal_switch} --dbpath #{@mongods[n]['db_path']} --port #{@mongods[n]['port']} --fork"
     @mongods[n]['start'] += " --dur" if @durable
+    @mongods[n]['start'] += " --smallfiles" if @smallfiles
     @mongods[n]['start']
   end
 
@@ -109,26 +137,26 @@ class ReplSetManager
     config = con['local']['system.replset'].find_one
     secondary = get_node_with_state(2)
     host_port = "#{@host}:#{@mongods[secondary]['port']}"
+    kill(secondary)
+    @mongods.delete(secondary)
     @config['members'].reject! {|m| m['host'] == host_port}
-
     @config['version'] = config['version'] + 1
 
-    primary = get_node_with_state(1)
-    con = get_connection(primary)
-
     begin
-    con['admin'].command({'replSetReconfig' => @config})
+      con['admin'].command({'replSetReconfig' => @config})
     rescue Mongo::ConnectionFailure
     end
 
     con.close
+
+    return secondary
   end
 
-  def add_node
+  def add_node(n=nil)
     primary = get_node_with_state(1)
     con = get_connection(primary)
-    init_node(@mongods.length)
 
+    init_node(n || @mongods.length)
     config = con['local']['system.replset'].find_one
     @config['version'] = config['version'] + 1
 
@@ -145,9 +173,8 @@ class ReplSetManager
   def kill(node, signal=2)
     pid = @mongods[node]['pid']
     puts "** Killing node with pid #{pid} at port #{@mongods[node]['port']}"
-    system("kill -#{signal} #{@mongods[node]['pid']}")
+    system("kill #{pid}")
     @mongods[node]['up'] = false
-    sleep(1)
   end
 
   def kill_primary(signal=2)
@@ -208,24 +235,54 @@ class ReplSetManager
   end
   alias :restart :start
 
-  def ensure_up
+  def ensure_up(n=nil, connection=nil)
     print "** Ensuring members are up..."
 
-    attempt do
-      con = get_connection
-      status = con['admin'].command({'replSetGetStatus' => 1})
+    attempt(n) do
       print "."
-      if status['members'].all? { |m| m['health'] == 1 &&
-         [1, 2, 7].include?(m['state']) } &&
-         status['members'].any? { |m| m['state'] == 1 }
-        print "all members up!\n\n"
+      con = connection || get_connection
+      begin
+        status = con['admin'].command({:replSetGetStatus => 1})
+      rescue Mongo::OperationFailure => ex
         con.close
-        return status
-      else
-        con.close
-        raise Mongo::OperationFailure
+        raise ex
       end
-    end
+      if status['members'].all? { |m| m['health'] == 1 &&
+       [1, 2, 7].include?(m['state']) } &&
+       status['members'].any? { |m| m['state'] == 1 }
+
+       connections = []
+       states      = []
+       status['members'].each do |member|
+         begin
+           host, port = member['name'].split(':')
+           port = port.to_i
+           conn = Mongo::Connection.new(host, port, :slave_ok => true)
+           connections << conn
+           state = conn['admin'].command({:ismaster => 1})
+           states << state
+         rescue Mongo::ConnectionFailure
+           connections.each {|c| c.close }
+           con.close
+           raise Mongo::OperationFailure
+         end
+       end
+
+       if states.any? {|s| s['ismaster']}
+         print "all members up!\n\n"
+         connections.each {|c| c.close }
+         con.close
+         return status
+       else
+         con.close
+         raise Mongo::OperationFailure
+       end
+     else
+       con.close
+       raise Mongo::OperationFailure
+     end
+     end
+    return false
   end
 
   def primary
@@ -254,9 +311,11 @@ class ReplSetManager
   private
 
   def initiate
+    puts "Initiating replica set..."
     con = get_connection
 
     attempt do
+      con.object_id
       con['admin'].command({'replSetInitiate' => @config})
     end
 
@@ -313,11 +372,11 @@ class ReplSetManager
     File.join(@path, name)
   end
 
-  def attempt
+  def attempt(retries=nil)
     raise "No block given!" unless block_given?
     count = 0
 
-    while count < @retries do
+    while count < (retries || @retries) do
       begin
         return yield
         rescue Mongo::OperationFailure, Mongo::ConnectionFailure => ex

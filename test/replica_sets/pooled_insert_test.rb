@@ -4,18 +4,18 @@ require './test/replica_sets/rs_test_helper'
 # NOTE: This test expects a replica set of three nodes to be running
 # on the local host.
 class ReplicaSetPooledInsertTest < Test::Unit::TestCase
-  include Mongo
+  include ReplicaSetTest
 
   def setup
-    @conn = ReplSetConnection.new([RS.host, RS.ports[0]], [RS.host, RS.ports[1]],
-      [RS.host, RS.ports[2]], :pool_size => 5, :timeout => 5)
+    @conn = ReplSetConnection.new([self.rs.host, self.rs.ports[0]], [self.rs.host, self.rs.ports[1]],
+      [self.rs.host, self.rs.ports[2]], :pool_size => 5, :timeout => 5, :refresh_mode => false)
     @db = @conn.db(MONGO_TEST_DB)
     @db.drop_collection("test-sets")
     @coll = @db.collection("test-sets")
   end
 
   def teardown
-    RS.restart_killed_nodes
+    self.rs.restart_killed_nodes
     @conn.close if @conn
   end
 
@@ -23,7 +23,7 @@ class ReplicaSetPooledInsertTest < Test::Unit::TestCase
     expected_results = [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     @coll.save({:a => -1}, :safe => true)
 
-    RS.kill_primary
+    self.rs.kill_primary
 
     threads = []
     10.times do |i|
@@ -34,8 +34,10 @@ class ReplicaSetPooledInsertTest < Test::Unit::TestCase
       end
     end
 
+    threads.each {|t| t.join}
+
     # Restart the old master and wait for sync
-    RS.restart_killed_nodes
+    self.rs.restart_killed_nodes
     sleep(1)
     results = []
 

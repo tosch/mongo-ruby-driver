@@ -36,6 +36,11 @@ class TestThreading < Test::Unit::TestCase
     assert_equal "s-_3#%R.t", parser.auths[0]["password"]
   end
 
+  def test_complex_usernames
+    parser = Mongo::URIParser.new('mongodb://b:ob:secret.word@a.example.com:27018/test')
+    assert_equal "b:ob", parser.auths[0]["username"]
+  end
+
   def test_passwords_contain_no_commas
     assert_raise MongoArgumentError do
       Mongo::URIParser.new('mongodb://bob:a,b@a.example.com:27018/test')
@@ -43,7 +48,7 @@ class TestThreading < Test::Unit::TestCase
   end
 
   def test_multiple_uris_with_auths
-    parser = Mongo::URIParser.new('mongodb://bob:secret@a.example.com:27018/test,joe:secret2@b.example.com/test2')
+    parser = Mongo::URIParser.new('mongodb://bob:secret@a.example.com:27018,b.example.com/test')
     assert_equal 2, parser.nodes.length
     assert_equal 'a.example.com', parser.nodes[0][0]
     assert_equal 27018, parser.nodes[0][1]
@@ -53,9 +58,9 @@ class TestThreading < Test::Unit::TestCase
     assert_equal "bob", parser.auths[0]["username"]
     assert_equal "secret", parser.auths[0]["password"]
     assert_equal "test", parser.auths[0]["db_name"]
-    assert_equal "joe", parser.auths[1]["username"]
-    assert_equal "secret2", parser.auths[1]["password"]
-    assert_equal "test2", parser.auths[1]["db_name"]
+    assert_equal "bob", parser.auths[1]["username"]
+    assert_equal "secret", parser.auths[1]["password"]
+    assert_equal "test", parser.auths[1]["db_name"]
   end
 
   def test_opts_basic
