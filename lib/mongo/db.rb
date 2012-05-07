@@ -17,7 +17,6 @@
 # ++
 
 require 'socket'
-require 'timeout'
 require 'thread'
 
 module Mongo
@@ -111,10 +110,13 @@ module Mongo
         if !save_auth
           raise MongoArgumentError, "If using connection pooling, :save_auth must be set to true."
         end
-        @connection.authenticate_pools
       end
 
-      issue_authentication(username, password, save_auth)
+      @connection.best_available_socket do |socket|
+        issue_authentication(username, password, save_auth, :socket => socket)
+      end
+
+      @connection.authenticate_pools
     end
 
     def issue_authentication(username, password, save_auth=true, opts={})
@@ -173,12 +175,15 @@ module Mongo
     #
     # @param [String] username
     # @param [String] password
+    # @param [Boolean] read_only
+    #   Create a read-only user.
     #
     # @return [Hash] an object representing the user.
-    def add_user(username, password)
+    def add_user(username, password, read_only = false)
       users = self[SYSTEM_USER_COLLECTION]
       user  = users.find_one({:user => username}) || {:user => username}
       user['pwd'] = Mongo::Support.hash_password(username, password)
+      user['readOnly'] = true if read_only;
       users.save(user)
       return user
     end
@@ -332,6 +337,7 @@ module Mongo
     # @option opts [Boolean] :fsync (false)
     # @option opts [Integer] :w (nil)
     # @option opts [Integer] :wtimeout (nil)
+    # @option opts [Boolean] :j (false)
     #
     # @return [Hash] the entire response to getlasterror.
     #

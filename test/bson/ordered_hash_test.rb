@@ -1,4 +1,4 @@
-require './test/bson/test_helper'
+require File.expand_path("../test_helper", __FILE__)
 
 class OrderedHashTest < Test::Unit::TestCase
 
@@ -15,7 +15,7 @@ class OrderedHashTest < Test::Unit::TestCase
     a['x'] = 1
     a['y'] = 2
 
-    b = BSON::OrderedHash['x' => 1, 'y' => 2]
+    b = BSON::OrderedHash['x', 1, 'y', 2]
     assert_equal a, b
   end
 

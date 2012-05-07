@@ -3,21 +3,25 @@ require './test/replica_sets/rs_test_helper'
 require 'logger'
 
 class ReadPreferenceTest < Test::Unit::TestCase
-  include ReplicaSetTest
 
   def setup
+    ensure_rs
     log = Logger.new("test.log")
-    @conn = ReplSetConnection.new([self.rs.host, self.rs.ports[0]],
-                                 [self.rs.host, self.rs.ports[1]],
-          :read => :secondary, :pool_size => 50,
-          :refresh_mode => false, :refresh_interval => 5, :logger => log)
+    seeds = build_seeds(2)
+    args = {
+      :read => :secondary,
+      :pool_size => 50,
+      :refresh_mode => false,
+      :refresh_interval => 5,
+      :logger => log
+    }
+    @conn = ReplSetConnection.new(seeds, args)
     @db = @conn.db(MONGO_TEST_DB)
     @db.drop_collection("test-sets")
-    col = @db['mongo-test']
   end
 
   def teardown
-    self.rs.restart_killed_nodes
+    @rs.restart_killed_nodes
   end
 
   def test_read_primary
@@ -34,8 +38,38 @@ class ReadPreferenceTest < Test::Unit::TestCase
       "Primary port and read port at the same!"
   end
 
+  def test_read_secondary_only
+    @rs.add_arbiter
+    @rs.remove_secondary_node
+    
+    @conn = ReplSetConnection.new(build_seeds(2), :read => :secondary_only)
+
+    @db = @conn.db(MONGO_TEST_DB)
+    @coll = @db.collection("test-sets")
+    
+    @coll.save({:a => 20}, :safe => {:w => 2})
+
+    # Test that reads are going to secondary on ReplSetConnection
+    @secondary = Connection.new(@rs.host, @conn.secondary_pool.port, :slave_ok => true)
+    queries_before = @secondary['admin'].command({:serverStatus => 1})['opcounters']['query']
+    @coll.find_one
+    queries_after = @secondary['admin'].command({:serverStatus => 1})['opcounters']['query']
+    assert_equal 1, queries_after - queries_before
+
+    @rs.kill_secondary
+    @conn.refresh
+    
+    # Test that reads are only allowed from secondaries
+    assert_raise ConnectionFailure.new("Could not checkout a socket.") do
+      @coll.find_one
+    end
+        
+    @rs = ReplSetManager.new
+    @rs.start_set
+  end
+
   def test_query_secondaries
-    @secondary = Connection.new(self.rs.host, @conn.read_pool.port, :slave_ok => true)
+    @secondary = Connection.new(@rs.host, @conn.read_pool.port, :slave_ok => true)
     @coll = @db.collection("test-sets", :safe => {:w => 3, :wtimeout => 20000})
     @coll.save({:a => 20})
     @coll.save({:a => 30})
@@ -49,11 +83,11 @@ class ReadPreferenceTest < Test::Unit::TestCase
     assert results.include?(30)
     assert results.include?(40)
 
-    self.rs.kill_primary
+    @rs.kill_primary
 
     results = []
     rescue_connection_failure do
-      puts "@coll.find().each"
+      #puts "@coll.find().each"
       @coll.find.each {|r| results << r}
       [20, 30, 40].each do |a|
         assert results.any? {|r| r['a'] == a}, "Could not find record for a => #{a}"
@@ -68,13 +102,12 @@ class ReadPreferenceTest < Test::Unit::TestCase
     assert_equal 2, @coll.find.to_a.length
 
     # Should still be able to read immediately after killing master node
-    self.rs.kill_primary
+    @rs.kill_primary
     assert_equal 2, @coll.find.to_a.length
     rescue_connection_failure do
-      puts "@coll.save()"
       @coll.save({:a => 50}, :safe => {:w => 2, :wtimeout => 10000})
     end
-    self.rs.restart_killed_nodes
+    @rs.restart_killed_nodes
     @coll.save({:a => 50}, :safe => {:w => 2, :wtimeout => 10000})
     assert_equal 4, @coll.find.to_a.length
   end
@@ -85,8 +118,8 @@ class ReadPreferenceTest < Test::Unit::TestCase
     @coll.save({:a => 30})
     assert_equal 2, @coll.find.to_a.length
 
-    read_node = self.rs.get_node_from_port(@conn.read_pool.port)
-    self.rs.kill(read_node)
+    read_node = @rs.get_node_from_port(@conn.read_pool.port)
+    @rs.kill(read_node)
 
     # Should fail immediately on next read
     old_read_pool_port = @conn.read_pool.port
@@ -141,7 +174,7 @@ class ReadPreferenceTest < Test::Unit::TestCase
   # end
 
   #def teardown
-  #  self.rs.restart_killed_nodes
+  #  @rs.restart_killed_nodes
   #end
 
 end

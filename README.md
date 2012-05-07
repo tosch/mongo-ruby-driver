@@ -1,3 +1,17 @@
+# Documentation
+
+This API documentation is available online at [http://api.mongodb.org/ruby](http://api.mongodb.org/ruby)
+for all releases of the MongoDB Ruby driver.  Please reference the exact version of the documentation
+that matches the release of the Ruby driver that you are using.  Note that the
+[Ruby Language Center for MongoDB](http://www.mongodb.org/display/DOCS/Ruby+Language+Center)
+has a link to API Documentation for the current release.
+
+If you have the source, you can generate the matching documentation  by typing
+
+    $ rake ydoc
+
+Then open the file +ydoc/index.html+.
+
 # Introduction
 
 This is the 10gen-supported Ruby driver for [MongoDB](http://www.mongodb.org).
@@ -37,7 +51,7 @@ for much more:
 
 ### Ruby Versions
 
-The driver works and is consistently tested on Ruby 1.8.6, 1.8.7, and 1.9.2, and JRuby 1.5.1.
+The driver works and is consistently tested on Ruby 1.8.7 and 1.9.3 as well as JRuby 1.6.6.
 
 Note that if you're on 1.8.7, be sure that you're using a patchlevel >= 249. There
 are some IO bugs in earlier versions.
@@ -62,7 +76,7 @@ And for a significant performance boost, you'll want to install the C extensions
     $ gem install bson_ext
 
 Note that bson_ext isn't used with JRuby. Instead, some native Java extensions are bundled with the bson gem.
-If you ever need to modify these extenions, you can recompile with the following rake task:
+If you ever need to modify these extensions, you can recompile with the following rake task:
 
     $ rake build:java
 
@@ -103,7 +117,7 @@ See also the test code, especially test/test_db_api.rb.
 
 The Ruby driver include two abstractions for storing large files: Grid and GridFileSystem.
 The Grid class is a Ruby implementation of MongoDB's GridFS file storage
-specification. GridFileSystem is essentailly the same, but provides a more filesystem-like API
+specification. GridFileSystem is essentially the same, but provides a more filesystem-like API
 and assumes that filenames are unique.
 
 An instance of both classes represents an individual file store. See the API reference
@@ -198,7 +212,7 @@ Here is a sample primary key factory, taken from the tests:
 
     class TestPKFactory
       def create_pk(row)
-        row['_id'] ||= Mongo::ObjectID.new
+        row['_id'] ||= BSON::ObjectId.new
         row
       end
     end
@@ -212,7 +226,7 @@ ActiveRecord-like framework for non-Rails apps) and the AR Mongo adapter code
       def create_pk(row)
         return row if row[:_id]
         row.delete(:_id)      # in case it exists but the value is nil
-        row['_id'] ||= Mongo::ObjectID.new
+        row['_id'] ||= BSON::ObjectId.new
         row
       end
     end
@@ -264,9 +278,22 @@ If implementing higher-level timeouts, using tools like `Rack::Timeout`, it's ve
 to call `Mongo::Connection#close` to prevent the subsequent operation from receiving the previous
 request.
 
+### Test-Unit, Shoulda, and Mocha
+
+Running the test suite requires test-unit, shoulda, and mocha.  You can install them as follows:
+
+    $ gem install test-unit
+    $ gem install shoulda
+    $ gem install mocha
+
+The tests assume that the Mongo database is running on the default port. You
+can override the default host (localhost) and port (Connection::DEFAULT_PORT) by
+using the environment variables MONGO_RUBY_DRIVER_HOST and
+MONGO_RUBY_DRIVER_PORT.
+
 # Testing
 
-If you have the source code, you can run the tests.
+If you have the source code, you can run the tests.  Skip this test with the C extension if you're running JRuby.
 
     $ rake test:c
 
@@ -279,37 +306,13 @@ These will run both unit and functional tests. To run these tests alone:
     $ rake test:unit
     $ rake test:functional
 
-To run any individual rake tasks with the C extension enabled, just pass C_EXT=true to the task:
+To run any individual rake tasks with the C extension enabled, just pass C_EXT=true to the task (don't do this with JRuby):
 
     $ rake test:unit C_EXT=true
 
-If you want to test replica set, you can run the following tests
-individually:
+If you want to test replica set, you can run the following task:
 
-    $ rake test:replica_set_count
-    $ rake test:replica_set_insert
-    $ rake test:replica_set_query
-
-### Shoulda and Mocha
-
-Running the test suite requires shoulda and mocha.  You can install them as follows:
-
-    $ gem install shoulda
-    $ gem install mocha
-
-The tests assume that the Mongo database is running on the default port. You
-can override the default host (localhost) and port (Connection::DEFAULT_PORT) by
-using the environment variables MONGO_RUBY_DRIVER_HOST and
-MONGO_RUBY_DRIVER_PORT.
-
-# Documentation
-
-This documentation is available online at [http://api.mongodb.org/ruby](http://api.mongodb.org/ruby). You can
-generate the documentation if you have the source by typing
-
-    $ rake ydoc
-
-Then open the file +ydoc/index.html+.
+    $ rake test:rs
 
 # Release Notes
 

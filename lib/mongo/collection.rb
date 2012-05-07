@@ -264,8 +264,8 @@ module Mongo
     # @return [OrderedHash, Nil]
     #   a single document or nil if no result is found.
     #
-    # @param [Hash, ObjectId, Nil] spec_or_object_id a hash specifying elements 
-    #   which must be present for a document to be included in the result set or an 
+    # @param [Hash, ObjectId, Nil] spec_or_object_id a hash specifying elements
+    #   which must be present for a document to be included in the result set or an
     #   instance of ObjectId to be used as the value for an _id query.
     #   If nil, an empty selector, {}, will be used.
     #
@@ -321,6 +321,10 @@ module Mongo
     #
     # @return [ObjectId, Array]
     #   The _id of the inserted document or a list of _ids of all inserted documents.
+    # @return [[ObjectId, Array], [Hash, Array]]
+    #   1st, the _id of the inserted document or a list of _ids of all inserted documents.
+    #   2nd, a list of invalid documents.
+    #   Return this result format only when :collect_on_error is true.
     #
     # @option opts [Boolean, Hash] :safe (+false+)
     #   run the operation in safe mode, which run a getlasterror command on the
@@ -333,7 +337,13 @@ module Mongo
     # @option opts [Boolean] :continue_on_error (+false+) If true, then
     #   continue a bulk insert even if one of the documents inserted
     #   triggers a database assertion (as in a duplicate insert, for instance).
+    #   If not using safe mode, the list of ids returned will
+    #   include the object ids of all documents attempted on insert, even
+    #   if some are rejected on error. When safe mode is
+    #   enabled, any error will raise an OperationFailure exception.
     #   MongoDB v2.0+.
+    # @option opts [Boolean] :collect_on_error (+false+) if true, then
+    #   collects invalid documents as an array. Note that this option changes the result format.
     #
     # @core insert insert-instance_method
     def insert(doc_or_docs, opts={})
@@ -403,7 +413,7 @@ module Mongo
     # @option opts [Boolean] :upsert (+false+) if true, performs an upsert (update or insert)
     # @option opts [Boolean] :multi (+false+) update all documents matching the selector, as opposed to
     #   just the first matching document. Note: only works in MongoDB 1.1.3 or later.
-    # @option opts [Boolean] :safe (+false+) 
+    # @option opts [Boolean] :safe (+false+)
     #   If true, check that the save succeeded. OperationFailure
     #   will be raised on an error. Note that a safe check requires an extra
     #   round-trip to the database. Safe options provided here will override any safe
@@ -624,7 +634,12 @@ module Mongo
       if raw
         result
       elsif result["result"]
-        @db[result["result"]]
+        if result['result'].is_a? BSON::OrderedHash and result['result'].has_key? 'db' and result['result'].has_key? 'collection'
+          otherdb = @db.connection[result['result']['db']]
+          otherdb[result['result']['collection']]
+        else
+          @db[result["result"]]
+        end
       else
         raise ArgumentError, "Could not instantiate collection from result. If you specified " +
           "{:out => {:inline => true}}, then you must also specify :raw => true to get the results."
@@ -888,15 +903,15 @@ module Mongo
         field_spec[spec.to_s] = 1
       elsif spec.is_a?(Array) && spec.all? {|field| field.is_a?(Array) }
         spec.each do |f|
-          if [Mongo::ASCENDING, Mongo::DESCENDING, Mongo::GEO2D].include?(f[1])
+          if [Mongo::ASCENDING, Mongo::DESCENDING, Mongo::GEO2D, Mongo::GEOHAYSTACK].include?(f[1])
             field_spec[f[0].to_s] = f[1]
           else
-            raise MongoArgumentError, "Invalid index field #{f[1].inspect}; " + 
+            raise MongoArgumentError, "Invalid index field #{f[1].inspect}; " +
               "should be one of Mongo::ASCENDING (1), Mongo::DESCENDING (-1) or Mongo::GEO2D ('2d')."
           end
         end
       else
-        raise MongoArgumentError, "Invalid index specification #{spec.inspect}; " + 
+        raise MongoArgumentError, "Invalid index specification #{spec.inspect}; " +
           "should be either a string, symbol, or an array of arrays."
       end
       field_spec
@@ -935,10 +950,28 @@ module Mongo
       else
         message = BSON::ByteBuffer.new("\0\0\0\0")
       end
+
+      collect_on_error = !!flags[:collect_on_error]
+      error_docs = [] if collect_on_error
+
       BSON::BSON_RUBY.serialize_cstr(message, "#{@db.name}.#{collection_name}")
-      documents.each do |doc|
-        message.put_binary(BSON::BSON_CODER.serialize(doc, check_keys, true, @connection.max_bson_size).to_s)
-      end
+      documents =
+        if collect_on_error
+          documents.select do |doc|
+            begin
+              message.put_binary(BSON::BSON_CODER.serialize(doc, check_keys, true, @connection.max_bson_size).to_s)
+              true
+            rescue StandardError # StandardError will be replaced with BSONError
+              doc.delete(:_id)
+              error_docs << doc
+              false
+            end
+          end
+        else
+          documents.each do |doc|
+            message.put_binary(BSON::BSON_CODER.serialize(doc, check_keys, true, @connection.max_bson_size).to_s)
+          end
+        end
       raise InvalidOperation, "Exceded maximum insert size of 16,000,000 bytes" if message.size > 16_000_000
 
       instrument(:insert, :database => @db.name, :collection => collection_name, :documents => documents) do
@@ -948,7 +981,13 @@ module Mongo
           @connection.send_message(Mongo::Constants::OP_INSERT, message)
         end
       end
-      documents.collect { |o| o[:_id] || o['_id'] }
+
+      doc_ids = documents.collect { |o| o[:_id] || o['_id'] }
+      if collect_on_error
+        return doc_ids, error_docs
+      else
+        doc_ids
+      end
     end
 
     def generate_index_name(spec)

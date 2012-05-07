@@ -1,4 +1,5 @@
-require './test/test_helper'
+require File.expand_path("../test_helper", __FILE__)
+require 'rbconfig'
 
 class TestCollection < Test::Unit::TestCase
   @@connection ||= standard_connection(:op_timeout => 10)
@@ -42,8 +43,10 @@ class TestCollection < Test::Unit::TestCase
   end
 
   def test_pk_factory_on_collection
-    @coll = Collection.new('foo', @@db, TestPK)
-    assert_equal TestPK, @coll.pk_factory
+    silently do
+      @coll = Collection.new('foo', @@db, TestPK)
+      assert_equal TestPK, @coll.pk_factory
+    end
 
 
     @coll2 = Collection.new('foo', @@db, :pk => TestPK)
@@ -151,6 +154,17 @@ class TestCollection < Test::Unit::TestCase
     end
   end
 
+  def test_bulk_insert
+    docs = []
+    docs << {:foo => 1}
+    docs << {:foo => 2}
+    docs << {:foo => 3}
+    response = @@test.insert(docs)
+    assert_equal 3, response.length
+    assert response.all? {|id| id.is_a?(BSON::ObjectId)}
+    assert_equal 3, @@test.count
+  end
+
   def test_bulk_insert_with_continue_on_error
     if @@version >= "2.0"
       @@test.create_index([["foo", 1]], :unique => true)
@@ -178,6 +192,56 @@ class TestCollection < Test::Unit::TestCase
       @@test.remove
       @@test.drop_index("foo_1")
     end
+  end
+
+  def test_bson_valid_with_collect_on_error
+    docs = []
+    docs << {:foo => 1}
+    docs << {:bar => 1}
+    doc_ids, error_docs = @@test.insert(docs, :collect_on_error => true)
+    assert_equal 2, @@test.count
+    assert_equal 2, doc_ids.count
+    assert_equal error_docs, []
+  end
+
+  def test_bson_invalid_key_serialize_error_with_collect_on_error
+    docs = []
+    docs << {:foo => 1}
+    docs << {:bar => 1}
+    invalid_docs = []
+    invalid_docs << {'$invalid-key' => 1}
+    invalid_docs << {'invalid.key'  => 1}
+    docs += invalid_docs
+    assert_raise BSON::InvalidKeyName do
+      @@test.insert(docs, :collect_on_error => false)
+    end
+    assert_equal 0, @@test.count
+
+    doc_ids, error_docs = @@test.insert(docs, :collect_on_error => true)
+    assert_equal 2, @@test.count
+    assert_equal 2, doc_ids.count
+    assert_equal error_docs, invalid_docs
+  end
+
+  def test_bson_invalid_encoding_serialize_error_with_collect_on_error
+    # Broken for current JRuby
+    if RUBY_PLATFORM == 'java' then return end
+    docs = []
+    docs << {:foo => 1}
+    docs << {:bar => 1}
+    invalid_docs = []
+    invalid_docs << {"\223\372\226}" => 1} # non utf8 encoding
+    docs += invalid_docs 
+    
+    assert_raise BSON::InvalidStringEncoding do
+      @@test.insert(docs, :collect_on_error => false)
+    end
+    assert_equal 0, @@test.count
+
+    doc_ids, error_docs = @@test.insert(docs, :collect_on_error => true)
+    assert_equal 2, @@test.count
+    assert_equal 2, doc_ids.count
+    assert_equal error_docs, invalid_docs
   end
 
   def test_maximum_insert_size
@@ -546,6 +610,22 @@ class TestCollection < Test::Unit::TestCase
         @@test.map_reduce(m, r, :raw => true, :out => {:inline => 1})
         assert res["results"]
       end
+      
+      def test_map_reduce_with_collection_output_to_other_db
+        @@test << {:user_id => 1}
+        @@test << {:user_id => 2}
+        
+        m = Code.new("function() { emit(this.user_id, 1); }")
+        r = Code.new("function(k,vals) { return 1; }")
+        oh = BSON::OrderedHash.new
+        oh[:replace] = 'foo'
+        oh[:db] = 'somedb'
+        res = @@test.map_reduce(m, r, :out => (oh))
+        assert res["result"]
+        assert res["counts"]
+        assert res["timeMillis"]
+        assert res.find.to_a.any? {|doc| doc["_id"] == 2 && doc["value"] == 1}
+      end
     end
   end
 
@@ -581,6 +661,7 @@ class TestCollection < Test::Unit::TestCase
   end
 
   def test_saving_dates_pre_epoch
+    if RbConfig::CONFIG['host_os'] =~ /mswin|mingw|cygwin/ then return true end
     begin
       @@test.save({'date' => Time.utc(1600)})
       assert_in_delta Time.utc(1600), @@test.find_one()["date"], 2

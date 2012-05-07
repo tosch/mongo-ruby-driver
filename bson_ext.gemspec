@@ -1,4 +1,6 @@
-require './lib/bson'
+$:.unshift(File.join(File.dirname(__FILE__), 'lib'))
+require 'bson'
+
 VERSION_HEADER = File.open(File.join(File.dirname(__FILE__), 'ext', 'cbson', 'version.h'), "r")
 VERSION        = VERSION_HEADER.read.scan(/VERSION "(\d[^"]+)"/)[0][0]
 Gem::Specification.new do |s|
@@ -20,5 +22,5 @@ Gem::Specification.new do |s|
   s.author = 'Mike Dirolf'
   s.email = 'mongodb-dev@googlegroups.com'
   s.homepage = 'http://www.mongodb.org'
-  s.add_dependency('bson', BSON::VERSION)
+  s.add_dependency('bson', "~> #{BSON::VERSION}")
 end

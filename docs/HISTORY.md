@@ -1,5 +1,45 @@
 # MongoDB Ruby Driver History
 
+### 1.6.2
+2012-04-05
+
+* Implements socket timeouts via non-blocking IO instead of Timeout module
+which should greately increase performance in highly threaded applications
+* Added ability to authentication via secondary if primary node unavailable
+* Replica set refresh interval now enforces a lower bound of 60 seconds
+* Added documentation for dropping indexes, collections, databases
+* Test output cleanup (...)s unless failure occurs
+
+### 1.6.1
+2012-03-07
+
+* Added thread affinity to Mongo::Pool
+* Added deploy tasks
+* Added Travis CI support (Cyril Mougel)
+* Logging warning message is only displayed for level :debug
+
+### 1.6.0
+2012-02-22
+
+* Added Gemfile
+* ReplSetConnection seed format is now array of 'host:port' strings
+* Added read preference :secondary_only
+* Added ability to log duration -- enabled by default (Cyril Mougel)
+* Added read_only option for DB#add_user (Ariel Salomon)
+* Added :collect_on_error option for bulk-insert (Masahiro Nakagawa)
+* Added and updated URI options (now case insensitive)
+* Bug fix for ReplSet refresh attempting to close a closed socket
+* Default op_timeout for ReplSetConnection is now disabled (was 30 seconds)
+* Support db output option for map reduce (John Ewart)
+* Support for keeping limited versions of files using GridFS (VvanGemert)
+
+### 1.5.2
+2011-12-13
+
+* Lots of fixes for replica set connection edge cases.
+* Set default op_timeout and connect_timeout to 30 seconds.
+* Support GeoHaystack indexing.
+
 ### 1.5.1
 2011-11-29
 

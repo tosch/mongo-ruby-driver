@@ -6,7 +6,7 @@ Gem::Specification.new do |s|
   s.version = Mongo::VERSION
 
   s.platform = Gem::Platform::RUBY
-  s.summary = 'Ruby driver for the MongoDB'
+  s.summary = 'Ruby driver for MongoDB'
   s.description = 'A Ruby driver for MongoDB. For more information about Mongo, see http://www.mongodb.org.'
 
   s.require_paths = ['lib']
@@ -26,9 +26,9 @@ Gem::Specification.new do |s|
   s.rdoc_options = ['--main', 'README.md', '--inline-source']
   s.extra_rdoc_files = ['README.md']
 
-  s.authors = ['Jim Menard', 'Mike Dirolf', 'Kyle Banker']
+  s.authors = ['Jim Menard', 'Mike Dirolf', 'Kyle Banker', 'Tyler Brock']
   s.email = 'mongodb-dev@googlegroups.com'
   s.homepage = 'http://www.mongodb.org'
 
-  s.add_dependency('bson', Mongo::VERSION)
+  s.add_dependency('bson', "~> #{Mongo::VERSION}")
 end

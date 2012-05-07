@@ -1,4 +1,4 @@
-require './test/test_helper'
+require File.expand_path("../../test_helper", __FILE__)
 include Mongo
 
 class PoolManagerTest < Test::Unit::TestCase
@@ -10,7 +10,8 @@ class PoolManagerTest < Test::Unit::TestCase
       @db = new_mock_db
 
       @connection = stub("Connection")
-      @connection.stubs(:connect_timeout).returns(5000)
+      @connection.stubs(:connect_timeout).returns(5)
+      @connection.stubs(:op_timeout).returns(5)
       @connection.stubs(:pool_size).returns(2)
       @connection.stubs(:pool_timeout).returns(100)
       @connection.stubs(:seeds).returns(['localhost:30000'])

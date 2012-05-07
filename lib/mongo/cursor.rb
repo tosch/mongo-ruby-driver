@@ -199,7 +199,7 @@ module Mongo
     # This method overrides any sort order specified in the Collection#find
     # method, and only the last sort applied has an effect.
     #
-    # @param [Symbol, Array] key_or_list either 1) a key to sort by or 2) 
+    # @param [Symbol, Array] key_or_list either 1) a key to sort by or 2)
     #   an array of [key, direction] pairs to sort by. Direction should
     #   be specified as Mongo::ASCENDING (or :ascending / :asc) or Mongo::DESCENDING (or :descending / :desc)
     #
@@ -463,15 +463,14 @@ module Mongo
 
     def send_initial_query
       message = construct_query_message
-      payload = instrument_payload if @logger
       sock    = @socket || checkout_socket_from_connection
-      instrument(:find, payload) do
+      instrument(:find, instrument_payload) do
         begin
         results, @n_received, @cursor_id = @connection.receive_message(
           Mongo::Constants::OP_QUERY, message, nil, sock, @command,
           nil, @options & OP_QUERY_EXHAUST != 0)
         rescue ConnectionFailure, OperationFailure, OperationTimeout => ex
-          force_checkin_socket(sock)
+          force_checkin_socket(sock) unless @socket
           raise ex
         end
         checkin_socket(sock) unless @socket
@@ -523,6 +522,8 @@ module Mongo
         @checkin_connection = true
         if @command || @read_preference == :primary
           socket = @connection.checkout_writer
+        elsif @read_preference == :secondary_only
+          socket = @connection.checkout_secondary
         else
           @read_pool = @connection.read_pool
           socket = @connection.checkout_reader

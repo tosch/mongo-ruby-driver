@@ -87,9 +87,13 @@ module Mongo
       end
 
       if num_received == 1 && (error = docs[0]['err'] || docs[0]['errmsg'])
-        close if error == "not master"
-        error = "wtimeout" if error == "timeout"
-        raise OperationFailure.new(docs[0]['code'].to_s + ': ' + error, docs[0]['code'], docs[0])
+        if error.include?("not master")
+          close
+          raise ConnectionFailure.new(docs[0]['code'].to_s + ': ' + error, docs[0]['code'], docs[0])
+        else
+          error = "wtimeout" if error == "timeout"
+          raise OperationFailure.new(docs[0]['code'].to_s + ': ' + error, docs[0]['code'], docs[0])
+        end
       end
 
       docs[0]
@@ -135,6 +139,11 @@ module Mongo
         result = receive(sock, request_id, exhaust)
       rescue SystemStackError, NoMemoryError, SystemCallError => ex
         close
+        raise ex
+      rescue Exception => ex
+        if defined?(IRB)
+          close if ex.class == IRB::Abort
+        end
         raise ex
       ensure
         if should_checkin
@@ -182,7 +191,10 @@ module Mongo
 
     def receive_header(sock, expected_response, exhaust=false)
       header = receive_message_on_socket(16, sock)
-      size, request_id, response_to = header.unpack('VVV')
+
+      # unpacks to size, request_id, response_to
+      response_to = header.unpack('VVV')[2]
+
       if !exhaust && expected_response != response_to
         raise Mongo::ConnectionFailure, "Expected response #{expected_response} but got #{response_to}"
       end
@@ -200,7 +212,10 @@ module Mongo
         raise "Short read for DB response header; " +
           "expected #{RESPONSE_HEADER_SIZE} bytes, saw #{header_buf.length}"
       end
-      flags, cursor_id_a, cursor_id_b, starting_from, number_remaining = header_buf.unpack('VVVVV')
+
+      # unpacks to flags, cursor_id_a, cursor_id_b, starting_from, number_remaining
+      flags, cursor_id_a, cursor_id_b, _, number_remaining = header_buf.unpack('VVVVV')
+      
       check_response_flags(flags)
       cursor_id = (cursor_id_b << 32) + cursor_id_a
       [number_remaining, cursor_id]
@@ -290,11 +305,11 @@ module Mongo
     # @return [Integer] number of bytes sent
     def send_message_on_socket(packed_message, socket)
       begin
-      total_bytes_sent = socket.send(packed_message, 0)
+      total_bytes_sent = socket.send(packed_message)
       if total_bytes_sent != packed_message.size
         packed_message.slice!(0, total_bytes_sent)
         while packed_message.size > 0
-          byte_sent = socket.send(packed_message, 0)
+          byte_sent = socket.send(packed_message)
           total_bytes_sent += byte_sent
           packed_message.slice!(0, byte_sent)
         end
@@ -310,22 +325,15 @@ module Mongo
     # Requires length and an available socket.
     def receive_message_on_socket(length, socket)
       begin
-        if @op_timeout
-          message = nil
-          Mongo::TimeoutHandler.timeout(@op_timeout, OperationTimeout) do
-            message = receive_data(length, socket)
-          end
-        else
           message = receive_data(length, socket)
-        end
-        rescue => ex
-          close
+      rescue OperationTimeout, ConnectionFailure => ex
+        close
 
-          if ex.class == OperationTimeout
-            raise OperationTimeout, "Timed out waiting on socket read."
-          else
-            raise ConnectionFailure, "Operation failed with the following exception: #{ex}"
-          end
+        if ex.class == OperationTimeout
+          raise OperationTimeout, "Timed out waiting on socket read."
+        else
+          raise ConnectionFailure, "Operation failed with the following exception: #{ex}"
+        end
       end
       message
     end
@@ -333,6 +341,7 @@ module Mongo
     def receive_data(length, socket)
       message = new_binary_string
       socket.read(length, message)
+ 
       raise ConnectionFailure, "connection closed" unless message && message.length > 0
       if message.length < length
         chunk = new_binary_string

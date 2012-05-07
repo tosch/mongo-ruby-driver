@@ -1,21 +1,23 @@
 # encoding:utf-8
-require './test/bson/test_helper'
+require File.expand_path("../test_helper", __FILE__)
 require 'set'
 
 if RUBY_VERSION < '1.9'
-  require 'complex'
-  require 'rational'
+  silently do
+    require 'complex'
+    require 'rational'
+  end
 end
 require 'bigdecimal'
 
 begin
   require 'date'
   require 'tzinfo'
-  require 'active_support/core_ext'
+  require 'active_support/timezone'
   Time.zone = "Pacific Time (US & Canada)"
   Zone = Time.zone.now
 rescue LoadError
-  warn 'Mocking time with zone'
+  #warn 'Mocking time with zone'
   module ActiveSupport
     class TimeWithZone
       def initialize(utc_time, zone)
@@ -74,14 +76,10 @@ class BSONTest < Test::Unit::TestCase
   end
 
   def test_limit_max_bson_size
-    doc = {'name' => 'a' * BSON_CODER.max_bson_size}
+    doc = {'name' => 'a' * BSON::DEFAULT_MAX_BSON_SIZE}
     assert_raise InvalidDocument do
       assert @encoder.serialize(doc)
     end
-  end
-
-  def test_max_bson_size
-    assert BSON_CODER.max_bson_size >= BSON::DEFAULT_MAX_BSON_SIZE
   end
 
   def test_update_max_bson_size
@@ -89,8 +87,10 @@ class BSONTest < Test::Unit::TestCase
     mock_conn = OpenStruct.new
     size      = 7 * 1024 * 1024
     mock_conn.max_bson_size = size
-    assert_equal size, BSON_CODER.update_max_bson_size(mock_conn)
-    assert_equal size, BSON_CODER.max_bson_size
+    silently do
+      assert_equal size, BSON_CODER.update_max_bson_size(mock_conn)
+      assert_equal size, BSON_CODER.max_bson_size
+    end
   end
 
   def test_round_trip
@@ -217,10 +217,10 @@ class BSONTest < Test::Unit::TestCase
     doc = {'doc' => {'age' => 42, 'date' => Time.now.utc, 'shoe_size' => 9.5}}
     bson = @encoder.serialize(doc)
     doc2 = @encoder.deserialize(bson)
-    assert doc['doc']
-    assert_equal 42,  doc['doc']['age']
-    assert_equal 9.5, doc['doc']['shoe_size']
-    assert_in_delta Time.now, doc['doc']['date'], 1
+    assert doc2['doc']
+    assert_equal 42,  doc2['doc']['age']
+    assert_equal 9.5, doc2['doc']['shoe_size']
+    assert_in_delta Time.now, doc2['doc']['date'], 1
   end
 
   def test_oid
@@ -269,6 +269,7 @@ class BSONTest < Test::Unit::TestCase
     doc = {'date' => [Time.now.utc]}
     bson = @encoder.serialize(doc)
     doc2 = @encoder.deserialize(bson)
+    assert doc2
   end
 
   def test_date_returns_as_utc
@@ -279,6 +280,7 @@ class BSONTest < Test::Unit::TestCase
   end
 
   def test_date_before_epoch
+    if RbConfig::CONFIG['host_os'] =~ /mswin|mingw|cygwin/ then return true end 
     begin
       doc = {'date' => Time.utc(1600)}
       bson = @encoder.serialize(doc)
@@ -297,7 +299,7 @@ class BSONTest < Test::Unit::TestCase
     [DateTime.now, Date.today, Zone].each do |invalid_date|
       doc = {:date => invalid_date}
       begin
-      bson = BSON::BSON_CODER.serialize(doc)
+      BSON::BSON_CODER.serialize(doc)
       rescue => e
       ensure
         if !invalid_date.is_a? Time
@@ -431,7 +433,7 @@ class BSONTest < Test::Unit::TestCase
 
   if !(RUBY_PLATFORM =~ /java/)
     def test_timestamp
-      val = {"test" => [4, 20]}
+      # val = {"test" => [4, 20]}
       result = @encoder.deserialize([0x13, 0x00, 0x00, 0x00,
                                      0x11, 0x74, 0x65, 0x73,
                                      0x74, 0x00, 0x04, 0x00,
@@ -455,7 +457,7 @@ class BSONTest < Test::Unit::TestCase
   def test_overflow
     doc = {"x" => 2**75}
     assert_raise RangeError do
-      bson = @encoder.serialize(doc)
+      @encoder.serialize(doc)
     end
 
     doc = {"x" => 9223372036854775}
@@ -466,7 +468,7 @@ class BSONTest < Test::Unit::TestCase
 
     doc["x"] = doc["x"] + 1
     assert_raise RangeError do
-      bson = @encoder.serialize(doc)
+      @encoder.serialize(doc)
     end
 
     doc = {"x" => -9223372036854775}
@@ -477,7 +479,7 @@ class BSONTest < Test::Unit::TestCase
 
     doc["x"] = doc["x"] - 1
     assert_raise RangeError do
-      bson = BSON::BSON_CODER.serialize(doc)
+      BSON::BSON_CODER.serialize(doc)
     end
   end
 
@@ -529,7 +531,7 @@ class BSONTest < Test::Unit::TestCase
     #one = {"_foo" => "foo"}
 
     #assert_equal @encoder.serialize(one).to_a, @encoder.serialize(dup).to_a
-    warn "Pending test for duplicate keys"
+    #warn "Pending test for duplicate keys"
   end
 
   def test_no_duplicate_id_when_moving_id

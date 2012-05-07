@@ -1,4 +1,4 @@
-require './test/test_helper'
+require File.expand_path("../test_helper", __FILE__)
 
 class GridFileSystemTest < Test::Unit::TestCase
   context "GridFileSystem:" do
@@ -165,6 +165,18 @@ class GridFileSystemTest < Test::Unit::TestCase
            assert_equal 0, @db['fs.chunks'].find({'files_id' => {'$in' => @ids}}).count
          end
 
+         should "delete all versions which exceed the number of versions to keep specified by the option :versions" do
+           @versions = 1 + rand(4-1)
+           @grid.open('sample', 'w', :versions => @versions) do |f|
+             f.write @new_data
+           end
+           @new_ids = @db['fs.files'].find({'filename' => 'sample'}).map {|file| file['_id']}
+           assert_equal @versions, @new_ids.length
+           id = @new_ids.first
+           assert !@ids.include?(id)
+           assert_equal @versions, @db['fs.files'].find({'filename' => 'sample'}).count
+         end
+         
          should "delete old versions on write with :delete_old is passed in" do
            @grid.open('sample', 'w', :delete_old => true) do |f|
              f.write @new_data
@@ -251,7 +263,9 @@ class GridFileSystemTest < Test::Unit::TestCase
 
       should "seek only in read mode" do
         assert_raise GridError do
-          @grid.open('hello', 'w') {|f| f.seek(0) }
+          silently do
+            @grid.open('hello', 'w') { |f| f.seek(0) }
+          end
         end
       end
     end

@@ -1,4 +1,4 @@
-require './test/test_helper'
+require File.expand_path("../../test_helper", __FILE__)
 
 class ReadTest < Test::Unit::TestCase
 
@@ -13,7 +13,7 @@ class ReadTest < Test::Unit::TestCase
   context "Read mode on replica set connection: " do
     setup do
       @read_preference = :secondary
-      @con = Mongo::ReplSetConnection.new(['localhost', 27017], :read => @read_preference, :connect => false)
+      @con = Mongo::ReplSetConnection.new(['localhost:27017'], :read => @read_preference, :connect => false)
     end
 
     should "store read preference on Connection" do
@@ -67,15 +67,16 @@ class ReadTest < Test::Unit::TestCase
     context "on read mode ops" do
       setup do
         @col = @con['foo']['bar']
-        @mock_socket = stub()
+        @mock_socket = new_mock_socket
       end
 
       should "use default value on query" do
         @cursor = @col.find({:a => 1})
-        sock = mock()
+        sock = new_mock_socket
         read_pool = stub(:checkin => true)
         @con.stubs(:read_pool).returns(read_pool)
         primary_pool = stub(:checkin => true)
+        sock.stubs(:pool).returns(primary_pool)
         @con.stubs(:primary_pool).returns(primary_pool)
         @con.expects(:checkout_reader).returns(sock)
         @con.expects(:receive_message).with do |o, m, l, s, c, r|
@@ -87,8 +88,9 @@ class ReadTest < Test::Unit::TestCase
 
       should "allow override default value on query" do
         @cursor = @col.find({:a => 1}, :read => :primary)
-        sock = mock()
+        sock = new_mock_socket
         primary_pool = stub(:checkin => true)
+        sock.stubs(:pool).returns(primary_pool)
         @con.stubs(:primary_pool).returns(primary_pool)
         @con.expects(:checkout_writer).returns(sock)
         @con.expects(:receive_message).with do |o, m, l, s, c, r|

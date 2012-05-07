@@ -26,20 +26,22 @@ module Mongo
     include Mongo::Logging
     include Mongo::Networking
 
-    TCPSocket = ::TCPSocket
-    UNIXSocket = ::UNIXSocket
+    TCPSocket = Mongo::TCPSocket
+    UNIXSocket = Mongo::UNIXSocket
     Mutex = ::Mutex
     ConditionVariable = ::ConditionVariable
 
     Thread.abort_on_exception = true
 
     DEFAULT_PORT = 27017
+    GENERIC_OPTS = [:ssl, :auths, :pool_size, :pool_timeout, :timeout, :op_timeout, :connect_timeout, :safe, :logger, :connect]
+    CONNECTION_OPTS = [:slave_ok]
 
     mongo_thread_local_accessor :connections
 
     attr_reader :logger, :size, :auths, :primary, :safe, :host_to_try,
       :pool_size, :connect_timeout, :pool_timeout,
-      :primary_pool, :socket_class
+      :primary_pool, :socket_class, :op_timeout
 
     # Create a connection to single MongoDB instance.
     #
@@ -67,7 +69,7 @@ module Mongo
     #   logging negatively impacts performance; therefore, it should not be used for high-performance apps.
     # @option opts [Integer] :pool_size (1) The maximum number of socket self.connections allowed per
     #   connection pool. Note: this setting is relevant only for multi-threaded applications.
-    # @option opts [Float] :pool_timeout (5.0) When all of the self.connections a pool are checked out,
+    # @option opts [Float] :timeout (5.0) When all of the self.connections a pool are checked out,
     #   this is the number of seconds to wait for a new connection to be released before throwing an exception.
     #   Note: this setting is relevant only for multi-threaded applications (which in Ruby are rare).
     # @option opts [Float] :op_timeout (nil) The number of seconds to wait for a read operation to time out.
@@ -77,16 +79,16 @@ module Mongo
     # @option opts [Boolean] :ssl (false) If true, create the connection to the server using SSL.
     #
     # @example localhost, 27017
-    #   Connection.new
+    #   Mongo::Connection.new
     #
     # @example localhost, 27017
-    #   Connection.new("localhost")
+    #   Mongo::Connection.new("localhost")
     #
     # @example localhost, 3000, max 5 self.connections, with max 5 seconds of wait time.
-    #   Connection.new("localhost", 3000, :pool_size => 5, :timeout => 5)
+    #   Mongo::Connection.new("localhost", 3000, :pool_size => 5, :timeout => 5)
     #
     # @example localhost, 3000, where this node may be a slave
-    #   Connection.new("localhost", 3000, :slave_ok => true)
+    #   Mongo::Connection.new("localhost", 3000, :slave_ok => true)
     #
     # @example Unix Domain Socket
     #   Connection.new "/var/run/mongodb.sock", :socket
@@ -103,9 +105,17 @@ module Mongo
       # Host and port of current master.
       @host = @port = nil
 
-      # slave_ok can be true only if one node is specified
-      @slave_ok = opts[:slave_ok]
+      # Default maximum BSON object size
+      @max_bson_size = Mongo::DEFAULT_MAX_BSON_SIZE
 
+      # Lock for request ids.
+      @id_lock = Mutex.new
+
+      # Connection pool for primay node
+      @primary      = nil
+      @primary_pool = nil
+
+      check_opts(opts)
       setup(opts)
     end
 
@@ -126,10 +136,10 @@ module Mongo
     #   to send reads to.
     #
     # @example
-    #   Connection.multi([["db1.example.com", 27017], ["db2.example.com", 27017]])
+    #   Mongo::Connection.multi([["db1.example.com", 27017], ["db2.example.com", 27017]])
     #
     # @example This connection will read from a random secondary node.
-    #   Connection.multi([["db1.example.com", 27017], ["db2.example.com", 27017], ["db3.example.com", 27017]],
+    #   Mongo::Connection.multi([["db1.example.com", 27017], ["db2.example.com", 27017], ["db3.example.com", 27017]],
     #                   :read_secondary => true)
     #
     # @return [Mongo::Connection]
@@ -384,14 +394,6 @@ module Mongo
       @slave_ok
     end
 
-    def get_socket_from_thread_local
-      Thread.current[:socket_map] ||= {}
-      Thread.current[:socket_map][self] ||= {}
-      Thread.current[:socket_map][self][:writer] ||= checkout_writer
-      Thread.current[:socket_map][self][:reader] = 
-        Thread.current[:socket_map][self][:writer]
-    end
-
     # Create a new socket and attempt to connect to master.
     # If successful, sets host and port to master and returns the socket.
     #
@@ -419,10 +421,6 @@ module Mongo
       end
     end
     alias :reconnect :connect
-
-    def connecting?
-      @nodes_to_try.length > 0
-    end
 
     # It's possible that we defined connected as all nodes being connected???
     # NOTE: Do check if this needs to be more stringent.
@@ -487,6 +485,12 @@ module Mongo
       @max_bson_size
     end
 
+    # Prefer primary pool but fall back to secondary
+    def checkout_best
+      connect unless connected?
+      @primary_pool.checkout
+    end
+
     # Checkout a socket for reading (i.e., a secondary node).
     # Note: this is overridden in ReplSetConnection.
     def checkout_reader
@@ -515,8 +519,21 @@ module Mongo
 
     # Check a socket back into its pool.
     def checkin(socket)
-      if @primary_pool
-        @primary_pool.checkin(socket)
+      if @primary_pool && socket
+        socket.pool.checkin(socket)
+      end
+    end
+
+    # Excecutes block with the best available socket
+    def best_available_socket
+      socket = nil
+      begin
+        socket = checkout_best
+        yield socket
+      ensure
+        if socket
+          socket.pool.checkin(socket)
+        end
       end
     end
 
@@ -530,24 +547,35 @@ module Mongo
 
     protected
 
-    # Generic initialization code.
+    def valid_opts
+      GENERIC_OPTS + CONNECTION_OPTS
+    end
+
+    def check_opts(opts)
+      bad_opts = opts.keys.reject { |opt| valid_opts.include?(opt) }
+
+      unless bad_opts.empty?
+        bad_opts.each {|opt| warn "#{opt} is not a valid option for #{self.class}"}
+      end
+    end
+
+    # Parse option hash
     def setup(opts)
-      # Default maximum BSON object size
-      @max_bson_size = Mongo::DEFAULT_MAX_BSON_SIZE
+      # slave_ok can be true only if one node is specified
+      @slave_ok = opts[:slave_ok]
 
       # Determine whether to use SSL.
       @ssl = opts.fetch(:ssl, false)
       if @ssl
         @socket_class = Mongo::SSLSocket
+      elsif @host_to_try[1] == :socket
+        @socket_class = Mongo::UNIXSocket
       else
-        @socket_class = ::TCPSocket
+        @socket_class = Mongo::TCPSocket
       end
 
       # Authentication objects
       @auths = opts.fetch(:auths, [])
-
-      # Lock for request ids.
-      @id_lock = Mutex.new
 
       # Pool size and timeout.
       @pool_size = opts[:pool_size] || 1
@@ -563,21 +591,10 @@ module Mongo
       # Timeout on socket connect.
       @connect_timeout = opts[:connect_timeout] || nil
 
-      # Mutex for synchronizing pool access
-      # TODO: remove this.
-      @connection_mutex = Mutex.new
-
       # Global safe option. This is false by default.
       @safe = opts[:safe] || false
 
-      # Condition variable for signal and wait
-      @queue = ConditionVariable.new
-
-      # Connection pool for primay node
-      @primary      = nil
-      @primary_pool = nil
-
-      @logger = opts[:logger] || nil
+      @logger = opts.fetch(:logger, nil)
 
       if @logger
         write_logging_startup_message
@@ -597,7 +614,7 @@ module Mongo
     def format_pair(host, port)
       case host
         when String
-          if port == :socket || port == 'socket'
+          if port == :socket || port == 'socket' || port < 0
             [host, :socket]
           else
             [host, port ? port.to_i : DEFAULT_PORT]
@@ -621,51 +638,20 @@ module Mongo
     def check_is_master(node)
       begin
         host, port = *node
+        socket = nil
+        config = nil
 
-        socket = if port == :socket
-          get_unix_socket(host)
-        else
-          get_tcp_socket(host, port)
-        end
-
+        socket = @socket_class.new(host, port, @op_timeout, @connect_timeout)
         config = self['admin'].command({:ismaster => 1}, :socket => socket)
-      rescue OperationFailure, SocketError, SystemCallError, IOError => ex
+      rescue OperationFailure, SocketError, SystemCallError, IOError
         close
       ensure
-        socket.close if socket
+        if socket
+          socket.close unless socket.closed?
+        end
       end
 
       config
-    end
-
-    def get_tcp_socket(host, port)
-      socket = nil
-
-      if @connect_timeout
-        Mongo::TimeoutHandler.timeout(@connect_timeout, OperationTimeout) do
-          socket = TCPSocket.new(host, port)
-          socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
-        end
-      else
-        socket = TCPSocket.new(host, port)
-        socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
-      end
-
-      socket
-    end
-
-    def get_unix_socket(path)
-      socket = nil
-
-      if @connect_timeout
-        Mongo::TimeoutHandler.timeout(@connect_timeout, OperationTimeout) do
-          socket = UNIXSocket.new(path)
-        end
-      else
-        socket = UNIXSocket.new(path)
-      end
-
-      socket
     end
 
     # Set the specified node as primary.

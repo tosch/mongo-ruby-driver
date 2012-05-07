@@ -37,9 +37,6 @@ module Mongo
      end
   end
 
-  # Raised when configuration options cause connections, queries, etc., to fail.
-  class ConfigurationError < MongoRubyError; end
-
   # Raised on fatal errors to GridFS.
   class GridError < MongoRubyError; end
 
@@ -74,7 +71,7 @@ module Mongo
   class OperationFailure < MongoDBError; end
 
   # Raised when a socket read operation times out.
-  class OperationTimeout < ::Timeout::Error; end
+  class OperationTimeout < SocketError; end
 
   # Raised when a client attempts to perform an invalid operation.
   class InvalidOperation < MongoDBError; end

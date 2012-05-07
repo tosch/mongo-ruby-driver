@@ -2,8 +2,8 @@ module Mongo
   class PoolManager
 
     attr_reader :connection, :arbiters, :primary, :secondaries, :primary_pool,
-      :read_pool, :secondary_pools, :hosts, :nodes, :max_bson_size,
-      :tags_to_pools, :tag_map, :members
+      :read_pool, :secondary_pool, :secondary_pools, :hosts, :nodes,
+      :max_bson_size, :tags_to_pools, :tag_map, :members
 
     # Create a new set of connection pools.
     #
@@ -84,6 +84,10 @@ module Mongo
       @refresh_required
     end
 
+    def closed?
+      pools.all? { |pool| pool.closed? }
+    end
+
     def close(opts={})
       begin
         if @primary_pool
@@ -114,6 +118,10 @@ module Mongo
 
     private
 
+    def pools
+      [@primary_pool, *@secondary_pools]
+    end
+
     def validate_existing_member(member)
       config = member.set_config
       if !config
@@ -135,12 +143,12 @@ module Mongo
     end
 
     def initialize_data
-      @seeds = []
       @primary = nil
       @primary_pool = nil
       @read_pool = nil
       @arbiters = []
       @secondaries = []
+      @secondary_pool = nil
       @secondary_pools = []
       @hosts = Set.new
       @members = Set.new
@@ -234,11 +242,13 @@ module Mongo
     # time to figure out which nodes to choose from.
     def set_read_pool
       if @secondary_pools.empty?
-         @read_pool = @primary_pool
+        @read_pool = @primary_pool
       elsif @secondary_pools.size == 1
-         @read_pool = @secondary_pools[0]
+        @read_pool = @secondary_pools[0]
+        @secondary_pool = @read_pool
       else
         @read_pool = nearby_pool_from_set(@secondary_pools)
+        @secondary_pool = @read_pool
       end
     end
 

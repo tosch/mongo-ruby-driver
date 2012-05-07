@@ -16,14 +16,13 @@
 # limitations under the License.
 # ++
 
-$:.unshift(File.join(File.dirname(__FILE__), '..', 'lib'))
-
 require 'mongo/version'
 
 module Mongo
-  ASCENDING  =  1
-  DESCENDING = -1
-  GEO2D      = '2d'
+  ASCENDING   =  1
+  DESCENDING  = -1
+  GEO2D       = '2d'
+  GEOHAYSTACK = 'geoHaystack'
 
   DEFAULT_MAX_BSON_SIZE = 4 * 1024 * 1024
 
@@ -62,6 +61,7 @@ require 'mongo/util/pool'
 require 'mongo/util/pool_manager'
 require 'mongo/util/server_version'
 require 'mongo/util/ssl_socket'
+require 'mongo/util/tcp_socket'
 require 'mongo/util/uri_parser'
 
 require 'mongo/collection'
@@ -78,6 +78,3 @@ if RUBY_PLATFORM =~ /java/
   require 'mongo/gridfs/grid_io_fix'
 end
 require 'mongo/gridfs/grid_file_system'
-
-require 'timeout'
-Mongo::TimeoutHandler = Timeout

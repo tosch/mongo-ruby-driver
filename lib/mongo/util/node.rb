@@ -36,20 +36,12 @@ module Mongo
     def connect
       begin
         socket = nil
-        if @connection.connect_timeout
-          Mongo::TimeoutHandler.timeout(@connection.connect_timeout, OperationTimeout) do
-            socket = @connection.socket_class.new(@host, @port)
-          end
-        else
-          socket = @connection.socket_class.new(@host, @port)
-        end
+        socket = @connection.socket_class.new(@host, @port, 
+          @connection.op_timeout, @connection.connect_timeout
+        )
 
-        if socket.nil?
-          return nil
-        else
-          socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
-        end
-      rescue OperationTimeout, OperationFailure, SocketError, SystemCallError, IOError => ex
+        return nil if socket.nil?
+      rescue OperationTimeout, ConnectionFailure, OperationFailure, SocketError, SystemCallError, IOError => ex
         @connection.log(:debug, "Failed connection to #{host_string} with #{ex.class}, #{ex.message}.")
         socket.close if socket
         return nil
@@ -74,7 +66,7 @@ module Mongo
       begin
         result = @connection['admin'].command({:ping => 1}, :socket => @socket)
         return result['ok'] == 1
-      rescue OperationFailure, SocketError, SystemCallError, IOError => ex
+      rescue OperationFailure, SocketError, SystemCallError, IOError
         return nil
       end
     end
@@ -95,6 +87,12 @@ module Mongo
       rescue ConnectionFailure, OperationFailure, OperationTimeout, SocketError, SystemCallError, IOError => ex
         @connection.log(:warn, "Attempted connection to node #{host_string} raised " +
                             "#{ex.class}: #{ex.message}")
+
+        # Socket may already be nil from issuing command
+        if @socket && !@socket.closed?
+          @socket.close
+        end
+
         return nil
       end
 
@@ -159,11 +157,15 @@ module Mongo
       [host, port]
     end
 
-    # Ensure that this node is a member of a replica set.
+    # Ensure that this node is a healty member of a replica set.
     def check_set_membership(config)
       if !config['hosts']
         message = "Will not connect to #{host_string} because it's not a member " +
           "of a replica set."
+        raise ConnectionFailure, message
+      elsif config['hosts'].length == 1 && !config['ismaster'] &&
+        !config['secondary']
+        message = "Attempting to connect to an unhealthy, single-node replica set."
         raise ConnectionFailure, message
       end
     end

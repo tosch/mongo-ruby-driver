@@ -1,4 +1,4 @@
-require './test/test_helper'
+require File.expand_path("../../test_helper", __FILE__)
 include Mongo
 
 class ConnectionTest < Test::Unit::TestCase
@@ -26,6 +26,40 @@ class ConnectionTest < Test::Unit::TestCase
       should "default slave_ok to false" do
         assert !@conn.slave_ok?
       end
+
+      should "warn if invalid options are specified" do
+        conn = Connection.allocate
+        opts = {:connect => false}
+
+        ReplSetConnection::REPL_SET_OPTS.each do |opt|
+          conn.expects(:warn).with("#{opt} is not a valid option for #{conn.class}")
+          opts[opt] = true
+        end
+
+        args = ['localhost', 27017, opts]
+        conn.send(:initialize, *args)
+      end
+
+      context "given a replica set" do
+        #should "enforce a minimum refresh_interval" do
+        #  @conn = ReplSetConnection.new(['localhost:27017'],
+        #    :connect => false, :refresh_mode => :sync, :refresh_interval => 10)
+        #  assert_equal 60, @conn.refresh_interval
+        #end
+
+        should "warn if invalid options are specified" do
+          conn = ReplSetConnection.allocate
+          opts = {:connect => false}
+
+          Connection::CONNECTION_OPTS.each do |opt|
+            conn.expects(:warn).with("#{opt} is not a valid option for #{conn.class}")
+            opts[opt] = true
+          end
+
+          args = [['localhost:27017'], opts]
+          conn.send(:initialize, *args)
+        end
+      end
     end
 
     context "initializing with a mongodb uri" do
@@ -44,6 +78,21 @@ class ConnectionTest < Test::Unit::TestCase
         host_name = "foo.bar-12345.org"
         @conn = Connection.from_uri("mongodb://#{host_name}/foo", :connect => false)
         assert_equal [host_name, 27017], @conn.host_to_try
+      end
+
+      should "set safe options on connection" do
+        host_name = "localhost"
+        opts = "safe=true&w=2&wtimeoutMS=1000&fsync=true&journal=true"
+        @conn = Connection.from_uri("mongodb://#{host_name}/foo?#{opts}", :connect => false)
+        assert_equal({:w => 2, :wtimeout => 1000, :fsync => true, :j => true}, @conn.safe)
+      end
+
+      should "set timeout options on connection" do
+        host_name = "localhost"
+        opts = "connectTimeoutMS=1000&socketTimeoutMS=5000"
+        @conn = Connection.from_uri("mongodb://#{host_name}/foo?#{opts}", :connect => false)
+        assert_equal 1, @conn.connect_timeout
+        assert_equal 5, @conn.op_timeout
       end
 
       should "parse a uri with a hyphen & underscore in the username or password" do

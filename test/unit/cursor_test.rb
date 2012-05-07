@@ -1,12 +1,14 @@
-require './test/test_helper'
+require File.expand_path("../../test_helper", __FILE__)
 
 class CursorTest < Test::Unit::TestCase
   context "Cursor options" do
     setup do
       @logger     = mock()
       @logger.stubs(:debug)
-      @connection = stub(:class => Connection, :logger => @logger, :slave_ok? => false, :read_preference => :primary)
-      @db         = stub(:name => "testing", :slave_ok? => false, :connection => @connection, :read_preference => :primary)
+      @connection = stub(:class => Connection, :logger => @logger,
+        :slave_ok? => false, :read_preference => :primary, :log_duration => false)
+      @db         = stub(:name => "testing", :slave_ok? => false,
+        :connection => @connection, :read_preference => :primary)
       @collection = stub(:db => @db, :name => "items", :read_preference => :primary)
       @cursor     = Cursor.new(@collection)
     end
@@ -100,7 +102,8 @@ class CursorTest < Test::Unit::TestCase
     setup do
       @logger     = mock()
       @logger.stubs(:debug)
-      @connection = stub(:class => Connection, :logger => @logger, :slave_ok? => false)
+      @connection = stub(:class => Connection, :logger => @logger, :slave_ok? => false,
+        :log_duration => false)
       @db = stub(:slave_ok? => true, :name => "testing", :connection => @connection)
       @collection = stub(:db => @db, :name => "items", :read_preference => :primary)
     end

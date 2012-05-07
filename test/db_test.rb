@@ -1,4 +1,4 @@
-require './test/test_helper'
+require File.expand_path("../test_helper", __FILE__)
 require 'digest/md5'
 require 'stringio'
 require 'logger'
@@ -149,6 +149,13 @@ class DBTest < Test::Unit::TestCase
     assert @@db.authenticate('foo:bar', '@foo')
     @@db.logout
     @@db.remove_user('foo:bar')
+  end
+
+  def test_authenticate_read_only
+    @@db.add_user('joebob', 'user', true) # read-only user
+    assert @@db.authenticate('joebob', 'user')
+    @@db.logout
+    @@db.remove_user('joebob')
   end
 
   def test_authenticate_with_connection_uri

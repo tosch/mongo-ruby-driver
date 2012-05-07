@@ -1,4 +1,4 @@
-require './test/test_helper'
+require File.expand_path("../../test_helper", __FILE__)
 
 # Essentialy the same as test_threading.rb but with an expanded pool for
 # testing multiple connections.
@@ -6,7 +6,7 @@ class TestThreadingLargePool < Test::Unit::TestCase
 
   include Mongo
 
-  @@db = standard_connection(:pool_size => 50, :timeout => 60).db(MONGO_TEST_DB)
+  @@db = standard_connection(:pool_size => 50, :pool_timeout => 60).db(MONGO_TEST_DB)
   @@coll = @@db.collection('thread-test-collection')
 
   def set_up_safe_data
