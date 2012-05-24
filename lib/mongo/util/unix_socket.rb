@@ -14,7 +14,7 @@ module Mongo
       @host = socket_path # TODO rename instance var
       @port = port
 
-      @socket_address = @host
+      @socket_address = Socket.sockaddr_un(@host)
 
       @socket = Socket.new(Socket::AF_UNIX, Socket::SOCK_STREAM, 0)
 
